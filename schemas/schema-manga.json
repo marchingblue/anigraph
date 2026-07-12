@@ -1,0 +1,188 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://anigraph.dev/schemas/schema-manga.json",
+  "title": "Anigraph Manga Entry",
+  "description": "A single manga entry in the anigraph dataset. Each line in anigraph-manga.jsonl.zst validates against this schema.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "integer",
+      "description": "AniList ID. This IS the canonical identity."
+    },
+    "type": {
+      "type": "string",
+      "const": "MANGA",
+      "description": "Entry type discriminator."
+    },
+    "sources": {
+      "type": "array",
+      "description": "Providers that contributed data to this entry.",
+      "items": {
+        "type": "string",
+        "enum": ["anilist", "fribb"]
+      }
+    },
+    "ids": {
+      "type": "object",
+      "description": "Cross-database identifiers.",
+      "properties": {
+        "mal": { "type": "integer", "description": "MyAnimeList ID" }
+      },
+      "additionalProperties": false
+    },
+    "titles": {
+      "type": "object",
+      "description": "Canonical title object.",
+      "properties": {
+        "romaji": { "type": "string", "description": "Romaji title" },
+        "english": { "type": "string", "description": "English title" },
+        "native": { "type": "string", "description": "Native script title" }
+      },
+      "required": ["romaji"],
+      "additionalProperties": false
+    },
+    "synonyms": {
+      "type": "array",
+      "description": "Alternative titles for search/fuzzy matching.",
+      "items": { "type": "string" }
+    },
+    "description": {
+      "type": "string",
+      "description": "Plain-text synopsis."
+    },
+    "format": {
+      "type": "string",
+      "description": "Media format.",
+      "enum": ["MANGA", "NOVEL", "ONE_SHOT"]
+    },
+    "chaptersCount": {
+      "type": "integer",
+      "description": "Total chapter count.",
+      "minimum": 0
+    },
+    "volumesCount": {
+      "type": "integer",
+      "description": "Total volume count.",
+      "minimum": 0
+    },
+    "status": {
+      "type": "string",
+      "description": "Release status.",
+      "enum": ["FINISHED", "RELEASING", "NOT_YET_RELEASED", "CANCELLED", "HIATUS"]
+    },
+    "source": {
+      "type": "string",
+      "description": "Original source material.",
+      "enum": ["ORIGINAL", "MANGA", "LIGHT_NOVEL", "VISUAL_NOVEL", "VIDEO_GAME", "OTHER", "NOVEL", "DOUJIN", "WEB_MANGA", "MUSIC", "PRINT", "COMIC", "BOOK", "CARD_GAME", "MIXED_MEDIA", "RADIO", "PICTURE_BOOK"]
+    },
+    "ageRating": {
+      "type": "string",
+      "description": "Content rating (from AniList isAdult).",
+      "enum": ["G", "PG", "R", "R18", "R18+"]
+    },
+    "dates": {
+      "type": "object",
+      "description": "Publication timeline.",
+      "properties": {
+        "start": { "$ref": "#/definitions/FuzzyDate", "description": "Start date." },
+        "end": { "$ref": "#/definitions/FuzzyDate", "description": "End date." }
+      },
+      "additionalProperties": false
+    },
+    "genres": {
+      "type": "array",
+      "description": "Curated genres.",
+      "items": { "type": "string" }
+    },
+    "tags": {
+      "type": "array",
+      "description": "User-contributed tags.",
+      "items": { "type": "string" }
+    },
+    "authors": {
+      "type": "array",
+      "description": "Primary creators filtered by allowlist (Story & Art, Story, Art, Original Creator).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "description": "AniList staff ID" },
+          "name": { "type": "string", "description": "Staff name" },
+          "role": {
+            "type": "string",
+            "description": "Role string from AniList allowlist.",
+            "enum": ["Story & Art", "Story", "Art", "Original Creator"]
+          }
+        },
+        "required": ["id", "name", "role"],
+        "additionalProperties": false
+      }
+    },
+    "score": {
+      "type": "object",
+      "description": "Scoring data.",
+      "properties": {
+        "average": { "type": "integer", "description": "Average score (0-100)", "minimum": 0, "maximum": 100 },
+        "mean": { "type": "integer", "description": "Mean score (0-100)", "minimum": 0, "maximum": 100 },
+        "popularity": { "type": "integer", "description": "Popularity count", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "artwork": {
+      "type": "array",
+      "description": "Artwork for this entry (AniList cover only).",
+      "items": {
+        "$ref": "#/definitions/Artwork"
+      }
+    },
+    "relations": {
+      "type": "array",
+      "description": "Relation graph to other entries.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Relation type.",
+            "enum": ["SEQUEL", "PREQUEL", "SIDE_STORY", "ADAPTATION", "SPIN_OFF", "CHARACTER", "OTHER", "SUMMARY", "ALTERNATIVE", "PARENT", "CONTAINS"]
+          },
+          "targetType": {
+            "type": "string",
+            "description": "Target entry type (ANIME or MANGA).",
+            "enum": ["ANIME", "MANGA"]
+          },
+          "target": {
+            "type": "integer",
+            "description": "AniList ID of the related entry."
+          }
+        },
+        "required": ["type", "targetType", "target"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["id", "type", "sources", "titles", "format", "status"],
+  "additionalProperties": false,
+  "definitions": {
+    "FuzzyDate": {
+      "type": "object",
+      "description": "A date that may have partial precision.",
+      "properties": {
+        "year": { "type": "integer" },
+        "month": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "day": { "type": "integer", "minimum": 1, "maximum": 31 }
+      },
+      "required": ["year"],
+      "additionalProperties": false
+    },
+    "Artwork": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["POSTER"] },
+        "provider": { "type": "string", "enum": ["anilist"] },
+        "url": { "type": "string", "format": "uri" }
+      },
+      "required": ["type", "provider", "url"],
+      "additionalProperties": false
+    }
+  }
+}

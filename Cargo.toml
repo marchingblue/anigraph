@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/providers",
+    "crates/model",
+    "crates/pipeline",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+urlencoding = "2"
+dirs = "5"
+zstd = { version = "0.13", features = ["experimental"] }
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+blake3 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+dotenvy = "0.15"
+
+[package]
+name = "anigraph"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anigraph-model = { path = "crates/model" }
+anigraph-pipeline = { path = "crates/pipeline" }
+rouge-providers = { path = "crates/providers" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+zstd = { workspace = true }
+dotenvy = { workspace = true }
+reqwest = { workspace = true }

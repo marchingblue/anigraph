@@ -1,0 +1,25 @@
+[package]
+name = "anigraph-pipeline"
+description = "Pipeline orchestration: enumeration, enrichment, output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anigraph-model = { path = "../model" }
+rouge-providers = { path = "../providers" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+indicatif = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+zstd = { workspace = true }
+sha2 = { workspace = true }
+reqwest = { workspace = true }
+futures = "0.3"

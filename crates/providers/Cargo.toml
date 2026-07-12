@@ -1,0 +1,21 @@
+[package]
+name = "rouge-providers"
+description = "External provider integrations (AniList, AODB, ...)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anigraph-model = { path = "../model" }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+urlencoding = { workspace = true }
+dirs = { workspace = true }

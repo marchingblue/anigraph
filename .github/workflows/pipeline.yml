@@ -1,0 +1,86 @@
+name: Generate dataset
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Weekly: Monday 6:00 AM UTC
+    - cron: '0 6 * * 1'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+      - name: Build
+        run: cargo build --release
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+
+  pipeline:
+    name: Generate dataset
+    # Only produce a release on scheduled weekly runs and manual dispatches,
+    # never on every PR/push (which only run the `ci` job above).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Generate dataset
+        run: cargo run --release -- --work-dir ./data --output-dir ./data
+        env:
+          THETVDB_KEY: ${{ secrets.THETVDB_KEY }}
+          TMDB_READ_KEY: ${{ secrets.TMDB_READ_KEY }}
+
+      # Compute release metadata. The release tag is made unique per run
+      # (date + GitHub run id) so two generations on the same day —
+      # e.g. a weekly run and a manual test — never collide.
+      - name: Compute release info
+        run: |
+          echo "RELEASE_DATE=$(date +%Y-%m-%d)" >> $GITHUB_ENV
+          echo "RELEASE_WEEK=$(date +%V)" >> $GITHUB_ENV
+          echo "RELEASE_TAG=${{ env.RELEASE_DATE }}-${{ github.run_id }}" >> $GITHUB_ENV
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "RELEASE_NAME=Week ${{ env.RELEASE_WEEK }} — ${{ env.RELEASE_DATE }}" >> $GITHUB_ENV
+            echo "MAKE_LATEST=true" >> $GITHUB_ENV
+          else
+            echo "RELEASE_NAME=Test — ${{ env.RELEASE_DATE }} (run ${{ github.run_id }})" >> $GITHUB_ENV
+            echo "MAKE_LATEST=false" >> $GITHUB_ENV
+          fi
+
+      # Create or update release with dataset artifacts.
+      - uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_NAME }}
+          artifacts: |
+            data/anime.jsonl.zst
+            data/manga.jsonl.zst
+            data/stats.json
+            data/checksums.txt
+            data/manifest.json
+          allowUpdates: true
+          makeLatest: ${{ env.MAKE_LATEST }}
+          omitBodyDuringUpdate: true
+          body: |
+            Automatic weekly dataset generation.
+
+            **Files**
+            - `anime.jsonl.zst` — enriched anime entries (AniList × Fribb × TMDB × TVDB)
+            - `manga.jsonl.zst` — manga entries (AniList)
+            - `stats.json` — pipeline run statistics
+            - `checksums.txt` — BLAKE3 + SHA256 hashes for verification
+            - `manifest.json` — machine-readable metadata (version, entry counts, hashes)
