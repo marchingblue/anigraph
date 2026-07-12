@@ -78,3 +78,61 @@ impl Drop for LockGuard {
         let _ = fs::remove_file(&self.path);
     }
 }
+
+#[cfg(unix)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Unique temp dir so concurrent tests don't share a lock file.
+    fn tmp_wd(label: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("anigraph-lock-{}-{}", label, std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn test_fresh_lock_is_acquired() {
+        let dir = tmp_wd("fresh");
+        let guard = acquire(&dir).expect("fresh lock should acquire");
+        let path = dir.join(".anigraph.lock");
+        assert!(path.exists(), "lock file must be written");
+        let content = fs::read_to_string(&path).unwrap();
+        // Lock records our own PID.
+        assert!(content.starts_with(&std::process::id().to_string()));
+        // Guard removes the file on drop.
+        drop(guard);
+        assert!(!path.exists(), "lock removed on drop");
+    }
+
+    #[test]
+    fn test_live_pid_is_refused() {
+        let dir = tmp_wd("live");
+        let path = dir.join(".anigraph.lock");
+        // Simulate another live instance holding the lock: write OUR pid.
+        fs::write(&path, format!("{}\n", std::process::id()))
+            .unwrap();
+        let res = acquire(&dir);
+        assert!(
+            res.is_err(),
+            "a lock held by a live PID must be refused"
+        );
+        // Refusing must not delete the other instance's lock.
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_stale_pid_is_taken_over() {
+        let dir = tmp_wd("stale");
+        let path = dir.join(".anigraph.lock");
+        // A PID that cannot be alive (well clear of any real pid).
+        fs::write(&path, "999999\n").unwrap();
+        let guard = acquire(&dir).expect("stale lock should be taken over");
+        let content = fs::read_to_string(&path).unwrap();
+        // After takeover the lock records OUR pid, not the stale one.
+        assert!(content.starts_with(&std::process::id().to_string()));
+        let _ = guard;
+    }
+}

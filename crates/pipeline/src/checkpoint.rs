@@ -497,4 +497,84 @@ mod tests {
         // Page 11 returns items 501-550 (idempotent with sort:ID)
         // No duplicates, no gaps
     }
+
+    // ── Per-page resume cursor (enumeration) ─────────────────────────
+    // Confirms the (next_window_start, current_inner_page) cursor that
+    // `enumerate` checkpoints after every page round-trips through save/load,
+    // and that a mid-window cursor resumes inside the same window while a
+    // window-boundary cursor jumps to the next window's first page.
+
+    fn tmp_ckpt_path(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("anigraph-ckpt-{}-{}", label, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("checkpoint.json")
+    }
+
+    #[test]
+    fn test_resume_cursor_mid_window_roundtrip() {
+        let path = tmp_ckpt_path("cursor-mid");
+        let mut ckpt = Checkpoint::new();
+        ckpt.begin_paginated(&PhaseId::AnilistAnime, 100, 50, Some(25.0));
+        // Complete 4 pages in the window starting at id 1, then record a
+        // checkpoint for the (hypothetical) 5th page.
+        for _ in 0..4u64 {
+            ckpt.complete_page(&PhaseId::AnilistAnime, 50, 0);
+        }
+        ckpt.set_window_cursor(&PhaseId::AnilistAnime, 1, 5);
+        ckpt.save(&path).unwrap();
+
+        let loaded = Checkpoint::load(&path).unwrap();
+        let s = loaded.paginated(&PhaseId::AnilistAnime).unwrap();
+        // Resume reads these two fields directly (see enumerate.rs resume block).
+        assert_eq!(s.next_window_start, Some(1));
+        assert_eq!(s.current_inner_page, Some(5));
+        assert_eq!(loaded.next_page(&PhaseId::AnilistAnime), 5);
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn test_resume_cursor_window_boundary_roundtrip() {
+        let path = tmp_ckpt_path("cursor-boundary");
+        let mut ckpt = Checkpoint::new();
+        ckpt.begin_paginated(&PhaseId::AnilistAnime, 100, 50, Some(25.0));
+        // Last page of window [1, 2000): cursor must jump to the next
+        // window's first page (2001, 1).
+        ckpt.set_window_cursor(&PhaseId::AnilistAnime, 2001, 1);
+        ckpt.save(&path).unwrap();
+
+        let loaded = Checkpoint::load(&path).unwrap();
+        let s = loaded.paginated(&PhaseId::AnilistAnime).unwrap();
+        assert_eq!(s.next_window_start, Some(2001));
+        assert_eq!(s.current_inner_page, Some(1));
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    // ── Backwards-compatible resume ─────────────────────────────────────
+    // Old checkpoints serialized the enumeration cursor as `id_greater_than`.
+    // The serde alias must still load it into `next_window_start` so a
+    // pre-per-page checkpoint resumes correctly.
+
+    #[test]
+    fn test_legacy_id_greater_than_alias() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "session_id": "legacy",
+            "started_at": "2024",
+            "updated_at": "2024",
+            "phases": {
+                "anilist_anime": {
+                    "phase_type": "paginated",
+                    "status": "in_progress",
+                    "id_greater_than": 4001
+                }
+            }
+        });
+        let ckpt: Checkpoint = serde_json::from_value(json).unwrap();
+        let s = ckpt.paginated(&PhaseId::AnilistAnime).unwrap();
+        assert_eq!(s.next_window_start, Some(4001));
+        // New field defaults to None for a legacy checkpoint.
+        assert_eq!(s.current_inner_page, None);
+    }
 }
