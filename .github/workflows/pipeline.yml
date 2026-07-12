@@ -13,6 +13,16 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Overlapping *dataset-generation* runs (weekly schedule vs a manual dispatch)
+# would both write ./data and collide on the single-instance lock. Keep
+# them in one concurrency group so a second run queues behind the
+# first instead of failing. PR/push `ci` runs use their branch ref
+# (normal behavior) and never block on — or get blocked by — a
+# generation run.
+concurrency:
+  group: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'dataset-generation' || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   ci:
     name: Build & test
@@ -36,6 +46,9 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: ci
     runs-on: ubuntu-latest
+    # Worst case (sustained 429 backoff) could otherwise run long;
+    # cap well under GitHub's 6h job limit.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
