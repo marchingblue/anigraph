@@ -23,7 +23,12 @@ const TVDB_FETCH_RETRIES: u32 = 3;
 /// How many entries to process concurrently.  With ~275ms latency per
 /// request, 10 concurrent workers keeps the 15 req/s limit saturated without
 /// over-pending.
-const TVDB_CONCURRENCY: usize = 10;
+const TVDB_CONCURRENCY: usize = 3;
+
+/// Safety cap: if the TVDB API returns `has_next=true` in an infinite loop
+/// (which happens for some series), we give up after this many pages so a
+/// single entry cannot hang the entire stream.
+const TVDB_MAX_EPISODE_PAGES: u32 = 100;
 
 const ANIME_TMDB: &str = "anime-tmdb.jsonl";
 const ANIME_TVDB: &str = "anime-tvdb.jsonl";
@@ -314,30 +319,29 @@ async fn fetch_with_retry(
     unreachable!()
 }
 
-/// Fetch a page of episodes for a series.
+/// Fetch one page of episodes, returning the episodes and the URL for the next
+/// page (if any).  TVDB v4 uses cursor-based pagination via `links.next` URLs;
+/// we *must* follow the returned URL rather than constructing our own, because
+/// the path segment `default/1` is fixed — the actual page cursor is in the
+/// `?page=N` query parameter.
 async fn fetch_episodes_page(
     http: &reqwest::Client,
     api_key: &str,
-    series_id: i32,
-    page: u32,
+    url: &str,
+    label: &str,
     token_cache: &Mutex<Option<String>>,
     bucket: &Mutex<TokenBucket>,
-) -> Result<(Vec<TvdbEpisode>, bool)> {
-    let url = format!("{TVDB_BASE_URL}/series/{series_id}/episodes/default/{page}");
-    let label = format!("TVDB episodes {series_id} p{page}");
-
-    let resp = fetch_with_retry(http, api_key, &url, &label, token_cache, bucket).await?;
+    pages_fetched: &mut u32,
+) -> Result<(Vec<TvdbEpisode>, Option<String>)> {
+    let resp = fetch_with_retry(http, api_key, url, label, token_cache, bucket).await?;
     let body: TvdbEpisodeResponse = resp.json().await
         .with_context(|| format!("{label}: parse failed"))?;
 
-    let has_next = body.links
-        .and_then(|l| l.next)
-        .is_some();
-
-    Ok((body.data.episodes, has_next))
+    *pages_fetched += 1;
+    Ok((body.data.episodes, body.links.and_then(|l| l.next)))
 }
 
-/// Fetch all episodes for a series (all pages).
+/// Fetch all episodes for a series, following TVDB's cursor-based pagination.
 async fn fetch_all_episodes(
     http: &reqwest::Client,
     api_key: &str,
@@ -346,16 +350,24 @@ async fn fetch_all_episodes(
     bucket: &Mutex<TokenBucket>,
 ) -> Result<Vec<TvdbEpisode>> {
     let mut all_episodes = Vec::new();
-    let mut page = 1u32;
+    let mut pages_fetched = 0u32;
+    let mut next_url: Option<String> = Some(
+        format!("{TVDB_BASE_URL}/series/{series_id}/episodes/default/1"),
+    );
 
-    loop {
-        let (episodes, has_next) = fetch_episodes_page(http, api_key, series_id, page, token_cache, bucket).await?;
-        all_episodes.extend(episodes);
-
-        if !has_next {
+    while let Some(url) = next_url.take() {
+        if pages_fetched >= TVDB_MAX_EPISODE_PAGES {
+            tracing::warn!(
+                "TVDB: series {series_id}: hit {TVDB_MAX_EPISODE_PAGES}-page cap, \
+                 aborting pagination"
+            );
             break;
         }
-        page += 1;
+        let label = format!("TVDB episodes {series_id} p{}", pages_fetched + 1);
+        let (episodes, next) =
+            fetch_episodes_page(http, api_key, &url, &label, token_cache, bucket, &mut pages_fetched).await?;
+        all_episodes.extend(episodes);
+        next_url = next;
     }
 
     Ok(all_episodes)
@@ -633,6 +645,14 @@ impl Phase for TvdbEnrichPhase {
                 };
                 return Ok(total);
             }
+            if !checkpoint.phases.contains_key(&phase_id) {
+                checkpoint.phases.insert(
+                    phase_id.clone(),
+                    crate::checkpoint::PhaseState::Simple(
+                        crate::checkpoint::SimpleState::new(total_input),
+                    ),
+                );
+            }
             if output_path.exists() { count_jsonl_lines(&output_path)? } else { 0 }
         } else {
             checkpoint.phases.insert(
@@ -643,6 +663,9 @@ impl Phase for TvdbEnrichPhase {
             );
             0
         };
+
+        // Wall-clock start, used for the ETA in the progress indicator.
+        let start = Instant::now();
 
         // ── Read entries ────────────────────────────────────────────────
         let reader = std::fs::File::open(&input_path)?;
@@ -689,33 +712,44 @@ impl Phase for TvdbEnrichPhase {
                 async move {
                     let idx = start_from + offset as u64;
 
-                    // Ensure we have a token before processing
-                    if let Err(e) = ensure_token(&http, &api_key, &token_cache, &bucket).await {
-                        tracing::warn!("TVDB: token acquisition failed at line {idx}: {e:#}");
-                        return (line, idx, false, 0u64, 0u64, 1u64);
-                    }
-
-                    let entry: Value = match serde_json::from_str(&line) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!("TVDB: malformed JSON at line {idx}: {e}");
+                    let line_for_timeout = line.clone();
+                    let fut = async {
+                        // Ensure we have a token before processing
+                        if let Err(e) = ensure_token(&http, &api_key, &token_cache, &bucket).await {
+                            tracing::warn!("TVDB: token acquisition failed at line {idx}: {e:#}");
                             return (line, idx, false, 0u64, 0u64, 1u64);
                         }
+
+                        let entry: Value = match serde_json::from_str(&line) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!("TVDB: malformed JSON at line {idx}: {e}");
+                                return (line, idx, false, 0u64, 0u64, 1u64);
+                            }
+                        };
+
+                        let has_tvdb_id = entry["ids"]["tvdb"].is_number();
+                        if !has_tvdb_id {
+                            return (line, idx, false, 0u64, 0u64, 0u64);
+                        }
+
+                        let result = enrich_entry(&http, &api_key, &token_cache, &bucket, entry).await;
+                        let out_line = serde_json::to_string(&result.entry)
+                            .unwrap_or_else(|_| line.clone());
+
+                        let found = if result.episode_count > 0 { 1u64 } else { 0u64 };
+                        let failure = if result.failure_occurred { 1u64 } else { 0u64 };
+
+                        (out_line, idx, true, result.episode_count, found, failure)
                     };
 
-                    let has_tvdb_id = entry["ids"]["tvdb"].is_number();
-                    if !has_tvdb_id {
-                        return (line, idx, false, 0u64, 0u64, 0u64);
+                    match tokio::time::timeout(Duration::from_secs(60), fut).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            tracing::warn!("TVDB: entry {idx} timed out after 60s");
+                            (line_for_timeout, idx, false, 0u64, 0u64, 1u64)
+                        }
                     }
-
-                    let result = enrich_entry(&http, &api_key, &token_cache, &bucket, entry).await;
-                    let out_line = serde_json::to_string(&result.entry)
-                        .unwrap_or_else(|_| line.clone());
-
-                    let found = if result.episode_count > 0 { 1u64 } else { 0u64 };
-                    let failure = if result.failure_occurred { 1u64 } else { 0u64 };
-
-                    (out_line, idx, true, result.episode_count, found, failure)
                 }
             },
         ))
@@ -742,16 +776,24 @@ impl Phase for TvdbEnrichPhase {
             stats.episodes_found += found;
             stats.failures += failure;
 
-            // Progress every 500 entries
+            if processed.is_multiple_of(50) && let Err(e) = writer.flush() {
+                tracing::warn!("TVDB: flush error at line {idx}: {e}");
+            }
+
             if processed.is_multiple_of(500) {
                 let written = start_from + processed;
                 if let crate::checkpoint::PhaseState::Simple(s) =
                     checkpoint.phases.get_mut(&phase_id).unwrap() { s.completed = written; }
-                tracing::info!(
-                    "TVDB: {}/{}  (with_ids={} episodes_found={} total_eps={} failures={})",
-                    written, stats.total_input,
-                    stats.with_ids, stats.episodes_found,
-                    stats.total_episodes, stats.failures,
+                crate::progress::log_progress(
+                    "TVDB",
+                    written,
+                    stats.total_input,
+                    Some(start),
+                    &[
+                        ("with_ids", stats.with_ids),
+                        ("eps_found", stats.episodes_found),
+                        ("failures", stats.failures),
+                    ],
                 );
             }
         }

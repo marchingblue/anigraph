@@ -2,7 +2,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anigraph_model::{
     AgeRating, AnimeEntry, Author, AuthorRole, CrossIds, EntryType, FuzzyDate,
@@ -23,6 +23,8 @@ const PER_PAGE: u32 = 50;
 /// queries past ~5,000 cumulative entries, so we walk the ID space in fixed
 /// windows via the `id_in` filter instead of paginating by page number.
 const WINDOW_SIZE: i32 = 2000;
+
+
 
 /// The two possible media types for enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +56,74 @@ impl MediaType {
     }
 }
 
+    // ── Progress indicator ────────────────────────────────────────────────────
+
+    fn fmt_duration(d: Duration) -> String {
+        let secs = d.as_secs();
+        if secs >= 3600 {
+            format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+        } else if secs >= 60 {
+            format!("{}m{:02}s", secs / 60, secs % 60)
+        } else {
+            format!("{secs}s")
+        }
+    }
+
+    /// Print a one-line progress update for the enumeration sweep.
+    ///
+    /// Progress is measured against the **window count** (the unit of work now
+    /// that windows are fetched concurrently) and the **ID space**
+    /// (1..=`max_id`) as a cosmetic "how much of the catalog" readout. Both are
+    /// estimates — the resume logic does not depend on either.
+    fn log_enum_progress(
+        name: &str,
+        max_id: i32,
+        windows_done: u64,
+        total_windows: u64,
+        pages_done: u64,
+        pages_est: u64,
+        start: Instant,
+    ) {
+        let total = max_id.max(0) as u64;
+        let ids_done = (windows_done * WINDOW_SIZE as u64).min(total);
+        let pct = 100.0 * windows_done as f64 / total_windows.max(1) as f64;
+        let ids_left = total.saturating_sub(ids_done);
+        let pages_left = pages_est.saturating_sub(pages_done);
+
+        let eta = if pages_done > 0 {
+            let per = start
+                .elapsed()
+                .checked_div(pages_done as u32)
+                .unwrap_or(Duration::ZERO);
+            fmt_duration(per.saturating_mul(pages_left as u32))
+        } else {
+            "?".to_string()
+        };
+
+        let filled = ((pct / 100.0) * 20.0).round() as usize;
+        let bar = format!(
+            "[{}{}]",
+            "#".repeat(filled),
+            "-".repeat(20usize.saturating_sub(filled))
+        );
+
+        tracing::info!(
+            "{} {} {:.1}% | windows {}/{} | ids {}/{} ({} left) | pages {}/{} ({} left) | ETA {}",
+            name,
+            bar,
+            pct,
+            windows_done,
+            total_windows,
+            ids_done,
+            total,
+            ids_left,
+            pages_done,
+            pages_est,
+            pages_left,
+            eta
+        );
+    }
+
 /// Enumeration phase: fetches all entries of a given media type from AniList.
 pub struct EnumeratePhase {
     pub media_type: MediaType,
@@ -75,6 +145,7 @@ impl Phase for EnumeratePhase {
     async fn run(&self, config: &PipelineConfig, checkpoint: &mut Checkpoint) -> Result<u64> {
         let id = self.id();
         let client = AnilistClient::new_unauthenticated();
+        let media_type_str = self.media_type.as_graphql_str();
         let output_path = config.work_dir.join(self.media_type.output_filename());
 
         // ── Probe the ID range to size the window sweep ───────────────────
@@ -83,7 +154,7 @@ impl Phase for EnumeratePhase {
         // in fixed windows using the `id_in` filter, which keeps each query's
         // result set tiny and immune to the depth limit.
         let max_id = client
-            .max_id(self.media_type.as_graphql_str())
+            .max_id(media_type_str)
             .await
             .context("probing AniList max media id")?;
         let total_windows = ((max_id.max(0) as u64) / WINDOW_SIZE as u64) + 1;
@@ -100,11 +171,16 @@ impl Phase for EnumeratePhase {
         let estimated_pages =
             ((max_id.max(0) as f64) * density / PER_PAGE as f64).ceil() as u64;
 
-        // ── Create/open the output file ────────────────────────────────
-        std::fs::create_dir_all(&config.work_dir)
-            .context("creating working directory")?;
+        std::fs::create_dir_all(&config.work_dir).context("creating working directory")?;
 
-        let (mut window_start, mut inner_page, mut writer) = if config.resume {
+        // ── Open output / resume cursor ──────────────────────────────────
+        // If `config.resume` is true but the CURRENT phase isn't checkpointed
+        // yet (e.g., anime completed its phase and saved the checkpoint, but
+        // manga hasn't started), we treat it as a fresh start for this phase
+        // by calling `begin_paginated`. If it IS checkpointed and completed,
+        // skip it entirely.
+        let phase_has_checkpoint = config.resume && checkpoint.paginated(&id).is_some();
+        let (start_window, resume_byte_pos) = if phase_has_checkpoint {
             if checkpoint.is_completed(&id) {
                 tracing::info!("{} already completed, skipping", self.name());
                 return Ok(checkpoint.items_written(&id));
@@ -113,30 +189,16 @@ impl Phase for EnumeratePhase {
                 .paginated(&id)
                 .and_then(|s| s.next_window_start)
                 .unwrap_or(1);
-            let inner = checkpoint
-                .paginated(&id)
-                .and_then(|s| s.current_inner_page)
-                .unwrap_or(1);
             let byte_pos = checkpoint.resume_byte_offset(&id);
-            let mut w = JsonlWriter::append(&output_path)
-                .context("opening output file for resume")?;
-            // Truncate to the exact byte position of the last fully written
-            // page so a partial page (from a crash mid-page) is dropped.
-            if byte_pos > 0 {
-                w.truncate_to(byte_pos)?;
-            }
             tracing::info!(
-                "Resuming {} from window id>={}, inner page {} (truncated to byte {})",
+                "Resuming {} from window id>={} (truncated to byte {})",
                 self.name(),
                 window,
-                inner,
                 byte_pos,
             );
-            (window, inner, w)
+            (window, byte_pos)
         } else {
-            // Fresh run
             checkpoint.begin_paginated(&id, estimated_pages, PER_PAGE, Some(25.0));
-            let w = JsonlWriter::new(&output_path)?;
             tracing::info!(
                 "Starting {} (id range 1..={}, ~{} windows of {})",
                 self.name(),
@@ -144,53 +206,54 @@ impl Phase for EnumeratePhase {
                 total_windows,
                 WINDOW_SIZE,
             );
-            (1i32, 1u32, w)
+            (1i32, 0u64)
         };
 
-        // ── Main fetch loop (ID-window sweep) ─────────────────────────────
-        // Each outer iteration is one ID window. Within a window we paginate
-        // with `page` until `hasNextPage` is false (a window can contain more
-        // than `PER_PAGE` matches). A **page** is the atomic unit of checkpoint
-        // progress: after every page is written, flushed, and checkpointed, so a
-        // crash mid-page simply re-fetches that single page on resume
-        // (idempotent — the output is truncated to the last completed page
-        // first, no duplicates, no gaps).
+        // Open the writer for the run. On resume we append+truncate; on a fresh
+        // run we create/truncate the file.
+        let mut writer = if config.resume && resume_byte_pos > 0 {
+            let mut w = JsonlWriter::append(&output_path)?;
+            w.truncate_to(resume_byte_pos)?;
+            w
+        } else {
+            JsonlWriter::new(&output_path)?
+        };
+
+        // ── Main fetch loop (sequential ID-window sweep) ───────────────
+        // Walk the ID space in fixed windows using `id_in`. Within each window
+        // we paginate with `page` until `hasNextPage` is false. After every
+        // page we flush and checkpoint, so a crash loses at most one page.
         let mut pages_completed = checkpoint
             .paginated(&id)
             .map(|s| s.last_completed_page)
             .unwrap_or(0);
 
-        loop {
-            if window_start > max_id {
-                break;
-            }
+        let start = Instant::now();
+        let mut window_start = start_window;
 
-            // Build the ID window [window_start, window_start + WINDOW_SIZE).
+        while window_start <= max_id.max(0) {
             let ids: Vec<i32> = (window_start..window_start + WINDOW_SIZE).collect();
-
-            // Paginate within the window, writing + flushing + checkpointing
-            // each page as it arrives so progress is continuous and a kill never
-            // loses more than one page.
+            // On resume, use the checkpointed inner page for the first window
+            // so we don't re-fetch pages already written before the crash.
+            // For subsequent windows or fresh runs, start from page 1.
+            let mut page = if phase_has_checkpoint && window_start == start_window {
+                checkpoint
+                    .paginated(&id)
+                    .and_then(|s| s.current_inner_page)
+                    .unwrap_or(1)
+            } else {
+                1u32
+            };
             let mut page_written = 0u64;
-            // Retry budget for the "empty page but has_next=true" anomaly.
-            // A genuine end-of-window returns has_next=false, handled
-            // separately below. A page that is empty *with* has_next=true is
-            // either AniList's known anomaly or a transient glitch. We retry
-            // a few times so a transient empty response can't silently skip
-            // the rest of the window's pages (which would lose entries).
             let mut empty_strikes = 0u32;
             const MAX_EMPTY_STRIKES: u32 = 3;
+
             loop {
                 let (media_list, has_next) = client
-                    .fetch_page(
-                        inner_page,
-                        PER_PAGE,
-                        self.media_type.as_graphql_str(),
-                        &ids,
-                    )
+                    .fetch_page(page, PER_PAGE, media_type_str, &ids)
                     .await
                     .with_context(|| {
-                        format!("fetching window id>={window_start} page {inner_page}")
+                        format!("fetching window id>={window_start} page {page}")
                     })
                     .map_err(|e| {
                         checkpoint.fail_phase(&id, &format!("{e:#}"));
@@ -200,30 +263,28 @@ impl Phase for EnumeratePhase {
                         e
                     })?;
 
-                // Genuine end of window: no matches at all.
                 if media_list.is_empty() && !has_next {
                     tracing::debug!(
-                        "window id>={window_start} page {inner_page}: empty (has_next=false), ending window",
+                        "window id>={window_start} page {page}: empty (has_next=false), ending window",
                     );
                     break;
                 }
 
-                // Empty but has_next=true — anomaly or transient glitch.
                 if media_list.is_empty() {
                     empty_strikes += 1;
                     if empty_strikes >= MAX_EMPTY_STRIKES {
                         tracing::warn!(
-                            "window id>={window_start} page {inner_page}: {empty_strikes}x empty \
+                            "window id>={window_start} page {page}: {empty_strikes}x empty \
                              with has_next=true; ending window to avoid an infinite loop"
                         );
                         break;
                     }
                     tracing::warn!(
-                        "window id>={window_start} page {inner_page}: empty but has_next=true \
+                        "window id>={window_start} page {page}: empty but has_next=true \
                          (strike {empty_strikes}/{MAX_EMPTY_STRIKES}), retrying"
                     );
                     tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue; // retry the SAME page; do not advance inner_page
+                    continue;
                 }
 
                 empty_strikes = 0;
@@ -232,7 +293,7 @@ impl Phase for EnumeratePhase {
                     if media.is_null() || !media.is_object() {
                         let media_id = media["id"].as_i64().unwrap_or(0);
                         tracing::warn!(
-                            "window id>={window_start} page {inner_page}: null entry at idx={idx}, anilist_id={media_id}",
+                            "window id>={window_start} page {page}: null entry at idx={idx}, anilist_id={media_id}",
                         );
                         if media_id > 0 {
                             checkpoint.record_failure(&id, media_id as u64);
@@ -240,13 +301,11 @@ impl Phase for EnumeratePhase {
                         continue;
                     }
 
-                    // Write directly — AnimeEntry and MangaEntry are different
-                    // types so we can't bind them to the same variable.
                     match self.media_type {
                         MediaType::Anime => {
                             let Some(entry) = anilist_media_to_anime_entry(media) else {
                                 let mid = media["id"].as_i64().unwrap_or(0);
-                                tracing::warn!("anime entry missing id at window id>={}, page={}, idx={idx}, id={mid}", window_start, inner_page);
+                                tracing::warn!("anime entry missing id at window id>={window_start}, page={page}, idx={idx}, id={mid}");
                                 continue;
                             };
                             writer.write(&entry)
@@ -255,7 +314,7 @@ impl Phase for EnumeratePhase {
                         MediaType::Manga => {
                             let Some(entry) = anilist_media_to_manga_entry(media) else {
                                 let mid = media["id"].as_i64().unwrap_or(0);
-                                tracing::warn!("manga entry missing id at window id>={}, page={}, idx={idx}, id={mid}", window_start, inner_page);
+                                tracing::warn!("manga entry missing id at window id>={window_start}, page={page}, idx={idx}, id={mid}");
                                 continue;
                             };
                             writer.write(&entry)
@@ -265,51 +324,40 @@ impl Phase for EnumeratePhase {
                     page_written += 1;
                 }
 
-                // Flush every page so the output grows visibly and durably.
                 writer.flush().context("flushing output page")?;
 
-                // ── Checkpoint this page ──────────────────────────────────
-                // The resume cursor is the (window, inner_page) of the NEXT
-                // page to fetch. If this was the last page of the window,
-                // that cursor jumps to the first page of the next window.
                 let byte_offset = writer.byte_offset();
                 pages_completed += 1;
                 checkpoint.complete_page(&id, page_written, byte_offset);
                 if has_next {
-                    checkpoint.set_window_cursor(&id, window_start, inner_page + 1);
+                    checkpoint.set_window_cursor(&id, window_start, page + 1);
                 } else {
-                    checkpoint
-                        .set_window_cursor(&id, window_start + WINDOW_SIZE, 1);
+                    checkpoint.set_window_cursor(&id, window_start + WINDOW_SIZE, 1);
                 }
                 checkpoint
                     .save(&config.checkpoint_path)
                     .context("saving checkpoint")?;
 
+                if pages_completed.is_multiple_of(10) {
+                    log_enum_progress(
+                        self.name(),
+                        max_id,
+                        (window_start as u64 / WINDOW_SIZE as u64) + 1,
+                        total_windows,
+                        pages_completed,
+                        estimated_pages,
+                        start,
+                    );
+                }
+
                 if !has_next {
                     break;
                 }
-                inner_page += 1;
+                page += 1;
             }
 
-            // Advance to the next window. `inner_page` resets to 1; the resume
-            // cursor already points at this next window (set above on the last
-            // page of the previous window).
             window_start += WINDOW_SIZE;
-            inner_page = 1;
-
-            // Periodic progress logging
-            let total_written = checkpoint.items_written(&id);
-            if pages_completed.is_multiple_of(10) {
-                tracing::info!(
-                    "{}: {} pages (id>={}) — {} items written",
-                    self.name(),
-                    pages_completed,
-                    window_start,
-                    total_written,
-                );
-            }
         }
-
         // ── Finalize ──────────────────────────────────────────────────────
         checkpoint.complete_paginated(&id);
         checkpoint

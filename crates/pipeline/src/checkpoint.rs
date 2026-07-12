@@ -73,12 +73,17 @@ pub enum PhaseStatus {
 ///   accurate on-disk position even if a crash happens between a flush and the
 ///   checkpoint save.
 ///
-/// **Worst case on crash:** At most one page (~50 items) of duplicated work
+/// **Worst case on crash:** At most one window of duplicated work
 /// (refetched, idempotent), never data loss or silent truncation.
 ///
-/// **If a phase is ever parallelized**, this page-based approach becomes
-/// unsound because pages may complete out of order. Parallel phases should
-/// use a `completed_ids: HashSet<u64>` set and avoid shared file I/O.
+/// **Sequential enumeration (current):** the enumeration phase walks ID windows
+/// in order, fetching pages one at a time within each window. Pages are written,
+/// flushed, and checkpointed individually via `complete_page`, so a crash loses
+/// at most one page. The resume cursor pairs `next_window_start` (which window
+/// contains the next page) with `current_inner_page` (the page within that
+/// window). The output file is truncated to the last fully written page's byte
+/// offset on resume — `sort: ID` is stable, so refetched pages yield the same
+/// entries in the same order: no duplicates, no gaps.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaginatedState {
     pub status: PhaseStatus,

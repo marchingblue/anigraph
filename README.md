@@ -1,10 +1,13 @@
 # anigraph
 
-> **Open-source anime & manga metadata dataset generator.**
+*Open-source anime & manga metadata dataset generator
 
-anigraph produces a complete, cross-referenced dataset of anime and manga metadata by pulling from multiple upstream sources and merging them into a unified schema.
+> [!IMPORTANT]
+> heavy use of ai assistance was involved during development
 
-It is the spiritual successor to the **Anime-Offline-Database** — same goal of a reliable, freely-available dataset, rebuilt from the ground up with modern tooling, checkpointed incremental generation, and richer enrichment.
+anigraph produces a complete, cross-referenced dataset of anime and manga metadata by pulling from multiple upstream sources and merging them into a unified schema. 
+
+It's the spiritual successor of [anime-offline-database](https://github.com/manami-project/anime-offline-database) which which has been archived on July 4th this year.
 
 ---
 
@@ -16,12 +19,6 @@ The final output is two [JSON Lines](https://jsonlines.org/) files, compressed w
 |------|----------|
 | `anime.jsonl.zst` | ~20K anime entries with episodes, artwork, cross-references |
 | `manga.jsonl.zst` | ~90K manga entries with artwork, cross-references |
-
-Each line is a complete entry — one JSON object per line. You can stream-decompress and process them line-by-line:
-
-```bash
-zstd -dc data/anime.jsonl.zst | head -n 1 | jq '.titles'
-```
 
 ### Additional output files
 
@@ -63,12 +60,12 @@ Total: roughly **2 hours** on a fresh run (~23 min with `--skip-enumeration`).
 ### Prerequisites
 
 - Rust 2024 edition (`rustup update`)
-- API keys (see [docs/environment.md](docs/environment.md))
+- API keys (tmdb and tvdb)
 
 ### Setup
 
 ```bash
-git clone https://github.com/YOUR_USER/anigraph
+git clone https://github.com/marchingblue/anigraph
 cd anigraph
 
 # Configure API keys

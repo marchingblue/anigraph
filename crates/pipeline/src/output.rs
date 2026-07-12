@@ -14,8 +14,8 @@ const ZSTD_COMPRESSION_LEVEL: i32 = 12;
 
 const ANIME_TVDB: &str = "anime-tvdb.jsonl";
 const MANGA_BASE: &str = "manga-base.jsonl";
-const ANIME_OUTPUT: &str = "anime.jsonl.zst";
-const MANGA_OUTPUT: &str = "manga.jsonl.zst";
+const ANIME_OUTPUT: &str = "anigraph-anime.jsonl.zst";
+const MANGA_OUTPUT: &str = "anigraph-manga.jsonl.zst";
 const CHECKSUMS_FILE: &str = "checksums.txt";
 const MANIFEST_FILE: &str = "manifest.json";
 
@@ -38,8 +38,8 @@ struct FileHashes {
 /// (BLAKE3 + SHA256), and write a machine-readable manifest.json.
 ///
 /// This is the last phase in the pipeline.  It reads:
-/// - `anime-tvdb.jsonl` (enriched anime) → compresses to `anime.jsonl.zst`
-/// - `manga-base.jsonl` (manga, no enrichment) → compresses to `manga.jsonl.zst`
+/// - `anime-tvdb.jsonl` (enriched anime) → compresses to `anigraph-anime.jsonl.zst`
+/// - `manga-base.jsonl` (manga, no enrichment) → compresses to `anigraph-manga.jsonl.zst`
 ///
 /// And writes:
 /// - `checksums.txt` — BLAKE3 and SHA256 hashes of compressed files
@@ -61,6 +61,14 @@ impl Phase for OutputPhase {
 
         // Determine work mode (fresh vs resume)
         let completed = if config.resume {
+            if !checkpoint.phases.contains_key(&phase_id) {
+                checkpoint.phases.insert(
+                    phase_id.clone(),
+                    crate::checkpoint::PhaseState::Simple(
+                        crate::checkpoint::SimpleState::new(2),
+                    ),
+                );
+            }
             checkpoint.is_completed(&phase_id)
         } else {
             checkpoint.phases.insert(

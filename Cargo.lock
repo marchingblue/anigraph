@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "anigraph"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anigraph-model",
  "anigraph-pipeline",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "anigraph-model"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "anigraph-pipeline"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anigraph-model",
  "anyhow",
@@ -1330,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "rouge-providers"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anigraph-model",
  "anyhow",

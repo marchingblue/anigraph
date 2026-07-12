@@ -29,7 +29,6 @@ pub struct PipelineConfig {
     /// TMDB API key (optional, skips TMDB phase if absent).
     pub tmdb_api_key: Option<String>,
     /// TVDB requests-per-second limit.  Defaults to 2 (empirically tested).
-    /// Set higher only after confirming with the standalone rate-limit tester.
     pub tvdb_rate_limit: f64,
 }
 

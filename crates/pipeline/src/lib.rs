@@ -17,6 +17,7 @@ pub mod lock;
 pub mod enumerate;
 pub mod jsonl_writer;
 pub mod output;
+pub mod progress;
 pub mod phase;
 pub mod runner;
 pub mod stats;

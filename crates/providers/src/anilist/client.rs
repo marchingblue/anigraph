@@ -60,8 +60,12 @@ impl From<reqwest::Error> for AnilistError {
 
 /// Token-bucket rate limiter for AniList API.
 ///
-/// AniList allows 90 requests per minute normally, but is currently degraded to 30.
-/// We use 25 req/min to leave headroom. The bucket refills one token every 2.4s.
+/// AniList rate-limits by **query complexity**, not raw request count, and the
+/// full 27-field enumeration query is expensive. The safe ceiling for this
+/// query shape seems to be around 20 req/min (one token every ~3s); higher
+/// values have triggered 429s. If the query is later lightened (fewer expensive
+/// fields), this can go back up toward 25-30. The bucket refills one token
+/// every `60_000 / rpm` ms.
 struct RateLimiter {
     tokens: f64,
     last_refill: Instant,
@@ -124,10 +128,13 @@ impl RateLimiter {
 
     /// Handle a 429 response by sleeping for the retry duration.
     ///
-    /// The wait is **capped at 300 seconds** so a misconfigured server
-    /// cannot hang the pipeline for longer than 5 minutes per strike.
+    /// The wait is **capped at 120 seconds** so a transient rate-limit
+    /// cannot hang the pipeline for longer than 2 minutes per strike. (At the
+    /// configured ~12 req/min we should never hit this, but if AniList's
+    /// complexity budget is temporarily tighter we recover quickly instead of
+    /// stalling for 5 minutes.)
     async fn handle_rate_limit(&mut self, retry_after_secs: u64) {
-        const MAX_WAIT: Duration = Duration::from_secs(300);
+        const MAX_WAIT: Duration = Duration::from_secs(120);
         let wait = Duration::from_secs(retry_after_secs).min(MAX_WAIT);
         tracing::warn!(
             wait_secs = wait.as_secs(),
@@ -143,8 +150,9 @@ impl RateLimiter {
 
 /// The rich enumeration query used to fetch all anime/manga entries from AniList.
 ///
-/// Tested live at perPage=50 with 27 fields — confirmed working with no complexity cap.
-/// See `docs/research/anilist.md` and `/tmp/test_enum_query.gql` for test results.
+/// **Staff (authors) is deliberately excluded** — it was the dominant server-time
+/// cost (~7s+ vs ~2.5s for the same query without it). A dedicated staff
+/// enrichment phase can backfill `Author`s in a future pass.
 pub const ENUMERATION_QUERY: &str = r#"
     query EnumPage($page: Int, $perPage: Int, $type: MediaType, $ids: [Int]) {
         Page(page: $page, perPage: $perPage) {
@@ -167,7 +175,6 @@ pub const ENUMERATION_QUERY: &str = r#"
                 genres
                 tags { name }
                 studios(isMain: true) { nodes { id name } }
-                staff(sort: ID, perPage: 10) { edges { role node { id name { full } } } }
                 averageScore
                 meanScore
                 popularity
@@ -254,7 +261,7 @@ impl AnilistClient {
         Self {
             client: reqwest::Client::new(),
             token: None,
-            limiter: Arc::new(Mutex::new(RateLimiter::new(25))),
+            limiter: Arc::new(Mutex::new(RateLimiter::new(20))),
         }
     }
 
@@ -263,7 +270,7 @@ impl AnilistClient {
         Self {
             client: reqwest::Client::new(),
             token: Some(token),
-            limiter: Arc::new(Mutex::new(RateLimiter::new(25))),
+            limiter: Arc::new(Mutex::new(RateLimiter::new(20))),
         }
     }
 

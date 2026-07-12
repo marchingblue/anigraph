@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -154,6 +154,9 @@ impl Phase for CrossRefPhase {
             fribb_map.len()
         );
 
+        // Wall-clock start, used for the ETA in the progress indicator.
+        let start = Instant::now();
+
         // ── Read input, cross-reference, write output ────────────────────
         let reader = std::fs::File::open(&anime_input)
             .context("opening anime-base.jsonl for reading")?;
@@ -228,9 +231,12 @@ impl Phase for CrossRefPhase {
 
             // Progress logging every 5K entries
             if idx > 0 && idx.is_multiple_of(5000) {
-                tracing::info!(
-                    "crossref: processed {idx}/{} entries (matched={matched}, unmatched={unmatched})",
+                crate::progress::log_progress(
+                    "crossref",
+                    idx,
                     total_input,
+                    Some(start),
+                    &[("matched", matched), ("unmatched", unmatched)],
                 );
             }
         }

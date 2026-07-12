@@ -3,9 +3,9 @@
 ## Getting started
 
 ```bash
-git clone https://github.com/YOUR_USER/anigraph
+git clone https://github.com/marchingblue/anigraph
 cd anigraph
-cp .env.example .env   # see docs/environment.md
+cp .env.example .env
 cargo build --release
 cargo test
 ```

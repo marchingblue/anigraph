@@ -446,6 +446,9 @@ impl Phase for TmdbEnrichPhase {
 
         tracing::info!("TMDB: processing {batch_size} entries (from line {start_from})");
 
+        // Wall-clock start, used for the ETA in the progress indicator.
+        let start = Instant::now();
+
         // ── Shared state ───────────────────────────────────────────────
         let http = reqwest::Client::new();
         let bucket = Arc::new(Mutex::new(TokenBucket::new(TMDB_RATE_LIMIT)));
@@ -518,13 +521,17 @@ impl Phase for TmdbEnrichPhase {
                 let written = start_from + processed;
                 if let crate::checkpoint::PhaseState::Simple(s) =
                     checkpoint.phases.get_mut(&phase_id).unwrap() { s.completed = written; }
-                tracing::info!(
-                    "TMDB: {}/{}  (TV={} movie={} artwork_found={} img={}/{}/{} failures={})",
-                    written, stats.total_input,
-                    stats.with_tv_ids, stats.with_movie_ids,
-                    stats.artwork_found,
-                    stats.total_poster_count, stats.total_backdrop_count, stats.total_logo_count,
-                    stats.failures,
+                crate::progress::log_progress(
+                    "TMDB",
+                    written,
+                    stats.total_input,
+                    Some(start),
+                    &[
+                        ("TV", stats.with_tv_ids),
+                        ("movie", stats.with_movie_ids),
+                        ("artwork", stats.artwork_found),
+                        ("failures", stats.failures),
+                    ],
                 );
             }
         }

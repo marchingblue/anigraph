@@ -75,9 +75,11 @@ fn main() -> Result<()> {
         fribb_path: cli.fribb_path,
         resume: cli.resume,
         skip_enumeration: cli.skip_enumeration,
-        tmdb_api_key: std::env::var("TMDB_READ_KEY").ok()
+        tmdb_api_key: std::env::var("TMDB_READ_KEY")
+            .ok()
             .or_else(|| std::env::var("TMDB_API_KEY").ok()),
-        tvdb_api_key: std::env::var("TVDB_API_KEY").ok()
+        tvdb_api_key: std::env::var("TVDB_API_KEY")
+            .ok()
             .or_else(|| std::env::var("THETVDB_KEY").ok()),
         skip_tmdb: cli.skip_tmdb,
         tvdb_rate_limit: cli.tvdb_rate,
