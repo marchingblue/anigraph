@@ -77,10 +77,12 @@ fn main() -> Result<()> {
         skip_enumeration: cli.skip_enumeration,
         tmdb_api_key: std::env::var("TMDB_READ_KEY")
             .ok()
-            .or_else(|| std::env::var("TMDB_API_KEY").ok()),
+            .or_else(|| std::env::var("TMDB_API_KEY").ok())
+            .map(|k| k.trim().to_string()),
         tvdb_api_key: std::env::var("TVDB_API_KEY")
             .ok()
-            .or_else(|| std::env::var("THETVDB_KEY").ok()),
+            .or_else(|| std::env::var("THETVDB_KEY").ok())
+            .map(|k| k.trim().to_string()),
         skip_tmdb: cli.skip_tmdb,
         tvdb_rate_limit: cli.tvdb_rate,
     };

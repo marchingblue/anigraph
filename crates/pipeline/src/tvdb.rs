@@ -81,7 +81,8 @@ struct TvdbLoginData {
 
 #[derive(Debug, Deserialize)]
 struct TvdbEpisodeResponse {
-    data: TvdbEpisodeData,
+    #[serde(default)]
+    data: Option<TvdbEpisodeData>,
     links: Option<TvdbLinks>,
 }
 
@@ -120,7 +121,8 @@ struct TvdbEpisode {
 /// for lenient parsing.
 #[derive(Debug, Default, Deserialize)]
 struct TvdbExtendedResponse {
-    data: TvdbExtendedData,
+    #[serde(default)]
+    data: Option<TvdbExtendedData>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -338,7 +340,7 @@ async fn fetch_episodes_page(
         .with_context(|| format!("{label}: parse failed"))?;
 
     *pages_fetched += 1;
-    Ok((body.data.episodes, body.links.and_then(|l| l.next)))
+    Ok((body.data.map(|d| d.episodes).unwrap_or_default(), body.links.and_then(|l| l.next)))
 }
 
 /// Fetch all episodes for a series, following TVDB's cursor-based pagination.
@@ -395,7 +397,7 @@ async fn fetch_artwork(
     let body: TvdbExtendedResponse = resp.json().await
         .with_context(|| format!("{label}: parse failed"))?;
 
-    Ok(body.data.artworks)
+    Ok(body.data.map(|d| d.artworks).unwrap_or_default())
 }
 
 // ── Episode mapping ────────────────────────────────────────────────────────
@@ -921,6 +923,23 @@ mod tests {
     fn test_map_tvdb_episodes_empty() {
         let eps = map_tvdb_episodes(&[]);
         assert!(eps.is_empty());
+    }
+
+    #[test]
+    fn test_tvdb_episode_response_null_data() {
+        // TVDB returns `{"data": null}` for some series (e.g. placeholder
+        // entries). Deserialization must not fail; episodes default to empty.
+        let body: TvdbEpisodeResponse = serde_json::from_str(r#"{"data": null}"#).unwrap();
+        assert!(body.data.is_none());
+        let eps: Vec<TvdbEpisode> = body.data.map(|d| d.episodes).unwrap_or_default();
+        assert!(eps.is_empty());
+    }
+
+    #[test]
+    fn test_tvdb_extended_response_null_data() {
+        let body: TvdbExtendedResponse = serde_json::from_str(r#"{"data": null}"#).unwrap();
+        let arts = body.data.map(|d| d.artworks).unwrap_or_default();
+        assert!(arts.is_empty());
     }
 
     // ── Artwork mapping ────────────────────────────────────────────────
