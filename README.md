@@ -1,13 +1,13 @@
 # anigraph
 
-*Open-source anime & manga metadata dataset generator
+*Open-source anime & manga metadata dataset generator*
 
 > [!IMPORTANT]
 > heavy use of ai assistance was involved during development
 
 anigraph produces a complete, cross-referenced dataset of anime and manga metadata by pulling from multiple upstream sources and merging them into a unified schema. 
 
-It's the spiritual successor of [anime-offline-database](https://github.com/manami-project/anime-offline-database) which which has been archived on July 4th this year.
+It's the spiritual successor of [anime-offline-database](https://github.com/manami-project/anime-offline-database) which has been archived on July 4th this year.
 
 ---
 
@@ -17,41 +17,17 @@ The final output is two [JSON Lines](https://jsonlines.org/) files, compressed w
 
 | File | Contents |
 |------|----------|
-| `anime.jsonl.zst` | ~20K anime entries with episodes, artwork, cross-references |
-| `manga.jsonl.zst` | ~90K manga entries with artwork, cross-references |
+| `anigraph-anime.jsonl.zst` | ~20K anime entries with episodes, artwork, cross-references |
+| `anigraph-manga.jsonl.zst` | ~130K manga entries with artwork                            |
 
 ### Additional output files
 
 | File | Contents |
 |------|----------|
-| `stats.json` | Pipeline run statistics (entry counts per phase) |
-| `checksums.txt` | **BLAKE3** and **SHA256** hashes of compressed files |
+| `checksums.txt` | **blake3** and **sha256** hashes of compressed files |
 | `manifest.json` | Machine-readable version metadata (entry counts, file sizes, hashes) |
 
 The manifest is useful for programmatic consumers — check its `version` field (set to the generation date) to detect whether the dataset has been updated.
-
----
-
-## Pipeline
-
-The dataset is generated in phases. Each phase is checkpointed — if it crashes halfway, resume from where it left off.
-
-```
-AniList Anime ──┐
-                ├── Fribb Cross-Ref ── TMDB ── TVDB ── Output
-AniList Manga ──┘
-```
-
-| Phase | Source | What it produces | Est. time |
-|-------|--------|-----------------|-----------|
-| 1. Anime Enumeration | AniList GraphQL | `anime-base.jsonl` | ~14 min |
-| 2. Manga Enumeration | AniList GraphQL | `manga-base.jsonl` | ~85 min |
-| 3. Cross-Reference | [Fribb/anime-lists](https://github.com/Fribb/anime-lists) | MAL, AniDB, TVDB, TMDB IDs | ~30 sec |
-| 4. TMDB Enrichment | TMDB API | Posters, backdrops, logos | ~2 min |
-| 5. TVDB Enrichment | TVDB v4 API | Episodes, artwork | ~17 min |
-| 6. Output | — | zstd compression + checksums + manifest | ~30 sec |
-
-Total: roughly **2 hours** on a fresh run (~23 min with `--skip-enumeration`).
 
 ---
 
@@ -59,7 +35,7 @@ Total: roughly **2 hours** on a fresh run (~23 min with `--skip-enumeration`).
 
 ### Prerequisites
 
-- Rust 2024 edition (`rustup update`)
+- rust 2024 edition (`rustup update`)
 - API keys (tmdb and tvdb)
 
 ### Setup
@@ -74,22 +50,6 @@ cp .env.example .env
 
 # Build & run the full pipeline
 cargo run --release -- --work-dir ./data --output-dir ./data
-```
-
-### Commands
-
-```bash
-# Full pipeline (2 hours)
-cargo run --release -- --work-dir ./data --output-dir ./data
-
-# Skip enumeration (faster iteration, 23 min)
-cargo run --release -- --work-dir ./data --output-dir ./data --skip-enumeration
-
-# Skip to specific phases
-cargo run --release -- --work-dir ./data --output-dir ./data --skip-enumeration --skip-tmdb
-
-# Resume after crash
-cargo run --release -- --work-dir ./data --output-dir ./data --resume
 ```
 
 ### Environment variables
