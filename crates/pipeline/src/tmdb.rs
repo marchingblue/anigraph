@@ -19,6 +19,14 @@ use crate::stats::TmdbPhaseStats;
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 const TMDB_IMAGE_URL: &str = "https://image.tmdb.org/t/p/original";
+
+/// TMDB v3 API keys are exactly 32 hex characters.  v4 read-access tokens are
+/// longer opaque strings.  The v3 API authenticates v3 keys via the
+/// `?api_key=` query parameter and v4 tokens via the `Authorization: Bearer`
+/// header — so we pick the scheme based on the key's shape.
+fn is_v3_api_key(key: &str) -> bool {
+    key.len() == 32 && key.chars().all(|c| c.is_ascii_hexdigit())
+}
 const TMDB_CONCURRENCY: usize = 20;
 const TMDB_RATE_LIMIT: f64 = 30.0;
 const TMDB_MAX_RETRIES: u32 = 3;
@@ -198,7 +206,11 @@ async fn fetch_with_retry(
             }
         }
 
-        match http.get(url).header("Authorization", format!("Bearer {api_key}")).send().await {
+        let mut req = http.get(url);
+        if !is_v3_api_key(api_key) {
+            req = req.header("Authorization", format!("Bearer {api_key}"));
+        }
+        match req.send().await {
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_success() {
@@ -236,7 +248,10 @@ async fn fetch_tv(
     bucket: &Mutex<TokenBucket>,
     id: i32,
 ) -> Result<Option<TmdbTvResponse>> {
-    let url = format!("{TMDB_BASE_URL}/tv/{id}?append_to_response=images,external_ids");
+    let mut url = format!("{TMDB_BASE_URL}/tv/{id}?append_to_response=images,external_ids");
+    if is_v3_api_key(api_key) {
+        url.push_str(&format!("&api_key={api_key}"));
+    }
     let label = format!("TMDB TV {id}");
     let resp = fetch_with_retry(http, api_key, bucket, &url, &label).await?;
 
@@ -252,7 +267,10 @@ async fn fetch_movie(
     bucket: &Mutex<TokenBucket>,
     id: i32,
 ) -> Result<Option<TmdbMovieResponse>> {
-    let url = format!("{TMDB_BASE_URL}/movie/{id}?append_to_response=images,external_ids");
+    let mut url = format!("{TMDB_BASE_URL}/movie/{id}?append_to_response=images,external_ids");
+    if is_v3_api_key(api_key) {
+        url.push_str(&format!("&api_key={api_key}"));
+    }
     let label = format!("TMDB movie {id}");
     let resp = fetch_with_retry(http, api_key, bucket, &url, &label).await?;
 
@@ -571,6 +589,23 @@ fn count_jsonl_lines(path: &std::path::Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── API key scheme detection ──────────────────────────────────────
+
+    #[test]
+    fn test_is_v3_api_key() {
+        // 32-char hex v3 key -> query-param auth
+        assert!(is_v3_api_key(
+            "0123456789abcdef0123456789abcdef"
+        ));
+        // v4 read token (long, non-hex) -> Bearer auth
+        assert!(!is_v3_api_key(
+            "eyJhbGciOiJIUzI1NiJ9.abcdefghijklmnopqrstuvwxyz0123456789"
+        ));
+        // non-hex character -> not a v3 key
+        assert!(!is_v3_api_key("0123456789abcdef0123456789abcdefg"));
+        assert!(!is_v3_api_key("too_short"));
+    }
 
     // ── Token bucket ───────────────────────────────────────────────────
 

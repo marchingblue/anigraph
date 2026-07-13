@@ -6,6 +6,18 @@ use clap::Parser;
 use anigraph_pipeline::phase::PipelineConfig;
 use anigraph_pipeline::runner::run_pipeline;
 
+/// Strip whitespace and any surrounding quote characters from a secret value
+/// so `.env`-style quoting or trailing newlines can't corrupt the auth header.
+fn sanitize_secret(key: String) -> String {
+    let trimmed = key.trim();
+    let stripped = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| trimmed.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(trimmed);
+    stripped.to_string()
+}
+
 /// anigraph — open-source anime/manga metadata dataset generator.
 ///
 /// Runs the full generation pipeline: AniList enumeration, Fribb
@@ -78,11 +90,11 @@ fn main() -> Result<()> {
         tmdb_api_key: std::env::var("TMDB_READ_KEY")
             .ok()
             .or_else(|| std::env::var("TMDB_API_KEY").ok())
-            .map(|k| k.trim().to_string()),
+            .map(sanitize_secret),
         tvdb_api_key: std::env::var("TVDB_API_KEY")
             .ok()
             .or_else(|| std::env::var("THETVDB_KEY").ok())
-            .map(|k| k.trim().to_string()),
+            .map(sanitize_secret),
         skip_tmdb: cli.skip_tmdb,
         tvdb_rate_limit: cli.tvdb_rate,
     };
