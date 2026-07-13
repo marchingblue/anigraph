@@ -13,10 +13,15 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 300
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Compute release tag
         id: meta
@@ -38,19 +43,14 @@ jobs:
 
       - name: Run pipeline
         if: steps.meta.outputs.exists != 'true'
-        run: cargo run --release
+        run: cargo run --release -- --work-dir ./data --output-dir ./data
         env:
           THETVDB_KEY: ${{ secrets.THETVDB_KEY }}
           TMDB_READ_KEY: ${{ secrets.TMDB_READ_KEY }}
 
-      - name: Create and push tag
-        if: steps.meta.outputs.exists != 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$RELEASE_TAG"
-          git push origin "$RELEASE_TAG"
-
+      # NOTE: softprops/action-gh-release creates the tag itself when it does
+      # not already exist, so there is no separate git-tag step. A failed run
+      # therefore leaves no tag behind — a manual retry starts clean.
       - name: Upload to release
         if: steps.meta.outputs.exists != 'true'
         uses: softprops/action-gh-release@v2
