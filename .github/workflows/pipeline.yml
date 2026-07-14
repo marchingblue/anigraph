@@ -31,6 +31,7 @@ jobs:
           EXISTS=$(git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1 && echo true || echo false)
           echo "exists=$EXISTS" >> "$GITHUB_OUTPUT"
           echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "DATE=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
 
       - name: Skip — tag already released
         if: steps.meta.outputs.exists == 'true'
@@ -56,7 +57,7 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: ${{ env.RELEASE_TAG }}
-          body: "automated scheduled release - entries updated @$(date -u +%Y-%m-%d)"
+          body: "automated scheduled release - entries updated @${{ env.DATE }}"
           files: |
             data/anigraph-anime.jsonl.zst
             data/anigraph-manga.jsonl.zst
