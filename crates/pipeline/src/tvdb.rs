@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use anigraph_model::{Artwork, ArtworkProvider, ArtworkType, Episode, EpisodeIds, EpisodeTitle, FuzzyDate};
+use anigraph_model::{normalize_language, Artwork, ArtworkProvider, ArtworkType};
 
 use crate::checkpoint::{Checkpoint, PhaseId};
 use crate::jsonl_writer::JsonlWriter;
@@ -24,11 +24,6 @@ const TVDB_FETCH_RETRIES: u32 = 3;
 /// request, 10 concurrent workers keeps the 15 req/s limit saturated without
 /// over-pending.
 const TVDB_CONCURRENCY: usize = 3;
-
-/// Safety cap: if the TVDB API returns `has_next=true` in an infinite loop
-/// (which happens for some series), we give up after this many pages so a
-/// single entry cannot hang the entire stream.
-const TVDB_MAX_EPISODE_PAGES: u32 = 100;
 
 const ANIME_TMDB: &str = "anime-tmdb.jsonl";
 const ANIME_TVDB: &str = "anime-tvdb.jsonl";
@@ -70,50 +65,20 @@ impl TokenBucket {
 // ── TVDB API response types ────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct TvdbLoginResponse {
-    data: TvdbLoginData,
-}
-
-#[derive(Debug, Deserialize)]
 struct TvdbLoginData {
     token: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct TvdbEpisodeResponse {
-    #[serde(default)]
-    data: Option<TvdbEpisodeData>,
-    links: Option<TvdbLinks>,
+struct TvdbLoginResponse {
+    data: TvdbLoginData,
 }
 
-#[derive(Debug, Deserialize)]
-struct TvdbEpisodeData {
-    episodes: Vec<TvdbEpisode>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TvdbLinks {
-    next: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TvdbEpisode {
-    id: Option<i32>,
-    number: Option<i32>,
-    #[serde(default)]
-    absolute_number: Option<i32>,
-    #[serde(default)]
-    season_number: Option<i32>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    overview: Option<String>,
-    #[serde(default)]
-    aired: Option<String>,
-    #[serde(default)]
-    runtime: Option<i32>,
-}
+// NOTE: TVDB v4's episode-list endpoints stopped returning `name`/`overview`
+// (they now come back null; titles moved to per-episode translation
+// endpoints), so anigraph no longer sources episodes from TVDB.  Episodes
+// come from the TMDB phase, filled in by the ani.zip phase.  TVDB remains
+// for artwork only.
 
 /// TVDB v4 extended series response — includes artworks, episodes, etc.
 /// We only deserialize the `artworks` field; the rest is ignored via
@@ -321,60 +286,6 @@ async fn fetch_with_retry(
     unreachable!()
 }
 
-/// Fetch one page of episodes, returning the episodes and the URL for the next
-/// page (if any).  TVDB v4 uses cursor-based pagination via `links.next` URLs;
-/// we *must* follow the returned URL rather than constructing our own, because
-/// the path segment `default/1` is fixed — the actual page cursor is in the
-/// `?page=N` query parameter.
-async fn fetch_episodes_page(
-    http: &reqwest::Client,
-    api_key: &str,
-    url: &str,
-    label: &str,
-    token_cache: &Mutex<Option<String>>,
-    bucket: &Mutex<TokenBucket>,
-    pages_fetched: &mut u32,
-) -> Result<(Vec<TvdbEpisode>, Option<String>)> {
-    let resp = fetch_with_retry(http, api_key, url, label, token_cache, bucket).await?;
-    let body: TvdbEpisodeResponse = resp.json().await
-        .with_context(|| format!("{label}: parse failed"))?;
-
-    *pages_fetched += 1;
-    Ok((body.data.map(|d| d.episodes).unwrap_or_default(), body.links.and_then(|l| l.next)))
-}
-
-/// Fetch all episodes for a series, following TVDB's cursor-based pagination.
-async fn fetch_all_episodes(
-    http: &reqwest::Client,
-    api_key: &str,
-    series_id: i32,
-    token_cache: &Mutex<Option<String>>,
-    bucket: &Mutex<TokenBucket>,
-) -> Result<Vec<TvdbEpisode>> {
-    let mut all_episodes = Vec::new();
-    let mut pages_fetched = 0u32;
-    let mut next_url: Option<String> = Some(
-        format!("{TVDB_BASE_URL}/series/{series_id}/episodes/default/1"),
-    );
-
-    while let Some(url) = next_url.take() {
-        if pages_fetched >= TVDB_MAX_EPISODE_PAGES {
-            tracing::warn!(
-                "TVDB: series {series_id}: hit {TVDB_MAX_EPISODE_PAGES}-page cap, \
-                 aborting pagination"
-            );
-            break;
-        }
-        let label = format!("TVDB episodes {series_id} p{}", pages_fetched + 1);
-        let (episodes, next) =
-            fetch_episodes_page(http, api_key, &url, &label, token_cache, bucket, &mut pages_fetched).await?;
-        all_episodes.extend(episodes);
-        next_url = next;
-    }
-
-    Ok(all_episodes)
-}
-
 /// Fetch artwork for a series (optional enrichment).
 ///
 /// TVDB v4 has no dedicated `/series/{id}/artwork` endpoint.  Artwork is
@@ -398,49 +309,6 @@ async fn fetch_artwork(
         .with_context(|| format!("{label}: parse failed"))?;
 
     Ok(body.data.map(|d| d.artworks).unwrap_or_default())
-}
-
-// ── Episode mapping ────────────────────────────────────────────────────────
-
-/// Parse an `aired` string like "2022-01-15" into a `FuzzyDate`.
-fn parse_tvdb_date(s: &str) -> Option<FuzzyDate> {
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let year = parts[0].parse::<i32>().ok()?;
-    let month = parts[1].parse::<i32>().ok();
-    let day = parts[2].parse::<i32>().ok();
-    Some(FuzzyDate { year, month, day })
-}
-
-fn map_tvdb_episodes(tvdb_eps: &[TvdbEpisode]) -> Vec<Episode> {
-    tvdb_eps
-        .iter()
-        .filter_map(|ep| {
-            let number = ep.number?;
-            let tvdb_id = ep.id?;
-
-            let titles = ep.name.as_ref().map(|name| EpisodeTitle {
-                english: Some(name.clone()),
-                native: None,
-                romaji: None,
-            });
-
-            let air_date = ep.aired.as_deref().and_then(parse_tvdb_date);
-
-            Some(Episode {
-                number,
-                absolute: ep.absolute_number,
-                season_number: ep.season_number,
-                titles,
-                air_date,
-                runtime: ep.runtime,
-                overview: ep.overview.clone(),
-                ids: Some(EpisodeIds { tvdb: tvdb_id }),
-            })
-        })
-        .collect()
 }
 
 // ── Artwork conversion ─────────────────────────────────────────────────────
@@ -497,7 +365,7 @@ fn map_tvdb_artwork(items: &[TvdbArtworkItem]) -> Vec<Artwork> {
                 url: full_url,
                 width: item.width,
                 height: item.height,
-                language: item.language.clone(),
+                language: item.language.as_deref().map(normalize_language),
             })
         })
         .collect()
@@ -508,13 +376,13 @@ fn map_tvdb_artwork(items: &[TvdbArtworkItem]) -> Vec<Artwork> {
 /// Per-entry results from TVDB enrichment.
 struct EnrichResult {
     entry: Value,
-    /// How many episodes were found?
-    episode_count: u64,
+    /// Did we add any TVDB artwork?
+    artwork_added: bool,
     /// Did any fetch fail?
     failure_occurred: bool,
 }
 
-/// Fetch TVDB data for a single entry and merge it in.
+/// Fetch TVDB artwork for a single entry and merge it in.
 async fn enrich_entry(
     http: &reqwest::Client,
     api_key: &str,
@@ -527,37 +395,11 @@ async fn enrich_entry(
     // Check if entry has a TVDB ID
     let tvdb_id = entry["ids"]["tvdb"].as_i64().map(|v| v as i32);
     let Some(series_id) = tvdb_id else {
-        return EnrichResult {
-            entry,
-            episode_count: 0,
-            failure_occurred: false,
-        };
+        return EnrichResult { entry, artwork_added: false, failure_occurred: false };
     };
 
-    // ── Fetch episodes ─────────────────────────────────────────────────
-    let episodes = match fetch_all_episodes(http, api_key, series_id, token_cache, bucket).await {
-        Ok(eps) => {
-            let mapped = map_tvdb_episodes(&eps);
-            if mapped.is_empty() { None } else { Some(mapped) }
-        }
-        Err(e) => {
-            let is_404 = e.to_string().contains("HTTP 404");
-            if is_404 {
-                tracing::debug!("TVDB: entry {anilist_id} (series {series_id}): 404 (not on TVDB)");
-            } else {
-                tracing::warn!("TVDB: entry {anilist_id} (series {series_id}): {e:#}");
-            }
-            return EnrichResult {
-                entry,
-                episode_count: 0,
-                failure_occurred: !is_404,
-            };
-        }
-    };
-
-    // ── Fetch artwork (best-effort, failure doesn't abort episode enrich) ──
+    // ── Fetch artwork (best-effort) ────────────────────────────────────
     let mut artwork_added = false;
-
     match fetch_artwork(http, api_key, series_id, token_cache, bucket).await {
         Ok(items) => {
             let artworks = map_tvdb_artwork(&items);
@@ -571,27 +413,17 @@ async fn enrich_entry(
             if !is_404 {
                 tracing::warn!("TVDB: entry {anilist_id} artwork: {e:#}");
             }
+            return EnrichResult { entry, artwork_added: false, failure_occurred: !is_404 };
         }
     }
 
-    // ── Write enriched data ────────────────────────────────────────────
-    if let Some(ref eps) = episodes {
-        entry["episodes"] = serde_json::to_value(eps).unwrap_or(Value::Null);
-    }
-
-    if (episodes.is_some() || artwork_added)
+    if artwork_added
         && let Some(sources) = entry["sources"].as_array_mut()
             && !sources.iter().any(|s| s == "tvdb") {
                 sources.push(Value::String("tvdb".to_string()));
             }
 
-    let episode_count = episodes.as_ref().map_or(0, |e| e.len() as u64);
-
-    EnrichResult {
-        entry,
-        episode_count,
-        failure_occurred: false,
-    }
+    EnrichResult { entry, artwork_added, failure_occurred: false }
 }
 
 /// Append `new_artworks` to the entry's existing `artwork` array.
@@ -608,13 +440,15 @@ fn merge_artwork(entry: &mut Value, new_artworks: Vec<Artwork>) {
 
 // ── Phase ──────────────────────────────────────────────────────────────────
 
-/// TVDB enrichment phase: fetch episodes and artwork from TheTVDB.
+/// TVDB enrichment phase: fetch additional artwork from TheTVDB.
 ///
-/// Uses ordered-buffered concurrency (same pattern as [`TmdbEnrichPhase`]):
-/// up to [`TVDB_CONCURRENCY`] entries are in-flight simultaneously, each
-/// making its own paginated episode + artwork requests through the shared
-/// rate limiter.  The token is cached behind an `Arc<Mutex<>>` so only one
-/// worker ever calls `/login`.
+/// Episodes are no longer sourced from TVDB (its list endpoints return null
+/// titles/overviews since the v4 API change); see [`crate::tmdb`] and
+/// [`crate::anizip`].  Uses ordered-buffered concurrency (same pattern as
+/// [`TmdbEnrichPhase`]): up to [`TVDB_CONCURRENCY`] entries are in-flight
+/// simultaneously, each fetching artwork through the shared rate limiter.
+/// The token is cached behind an `Arc<Mutex<>>` so only one worker ever
+/// calls `/login`.
 ///
 /// Pass-through: every entry is written through even on failure.
 pub struct TvdbEnrichPhase;
@@ -703,7 +537,7 @@ impl Phase for TvdbEnrichPhase {
         let api_key = api_key.clone();
 
         // ── Ordered buffered processing ─────────────────────────────────
-        // Each stream item returns: (out_line, idx, has_tvdb_id, episode_count, episodes_found, failure)
+        // Each stream item returns: (out_line, idx, has_tvdb_id, artwork_added, failure)
         let stream = futures::stream::iter(lines.into_iter().enumerate().map(
             move |(offset, line)| {
                 let http = http.clone();
@@ -719,37 +553,37 @@ impl Phase for TvdbEnrichPhase {
                         // Ensure we have a token before processing
                         if let Err(e) = ensure_token(&http, &api_key, &token_cache, &bucket).await {
                             tracing::warn!("TVDB: token acquisition failed at line {idx}: {e:#}");
-                            return (line, idx, false, 0u64, 0u64, 1u64);
+                            return (line, idx, false, 0u64, 1u64);
                         }
 
                         let entry: Value = match serde_json::from_str(&line) {
                             Ok(v) => v,
                             Err(e) => {
                                 tracing::warn!("TVDB: malformed JSON at line {idx}: {e}");
-                                return (line, idx, false, 0u64, 0u64, 1u64);
+                                return (line, idx, false, 0u64, 1u64);
                             }
                         };
 
                         let has_tvdb_id = entry["ids"]["tvdb"].is_number();
                         if !has_tvdb_id {
-                            return (line, idx, false, 0u64, 0u64, 0u64);
+                            return (line, idx, false, 0u64, 0u64);
                         }
 
                         let result = enrich_entry(&http, &api_key, &token_cache, &bucket, entry).await;
                         let out_line = serde_json::to_string(&result.entry)
                             .unwrap_or_else(|_| line.clone());
 
-                        let found = if result.episode_count > 0 { 1u64 } else { 0u64 };
+                        let added = if result.artwork_added { 1u64 } else { 0u64 };
                         let failure = if result.failure_occurred { 1u64 } else { 0u64 };
 
-                        (out_line, idx, true, result.episode_count, found, failure)
+                        (out_line, idx, true, added, failure)
                     };
 
                     match tokio::time::timeout(Duration::from_secs(60), fut).await {
                         Ok(result) => result,
                         Err(_) => {
                             tracing::warn!("TVDB: entry {idx} timed out after 60s");
-                            (line_for_timeout, idx, false, 0u64, 0u64, 1u64)
+                            (line_for_timeout, idx, false, 0u64, 1u64)
                         }
                     }
                 }
@@ -768,15 +602,14 @@ impl Phase for TvdbEnrichPhase {
         let mut processed = 0u64;
 
         tokio::pin!(stream);
-        while let Some((out_line, idx, has_id, ep_count, found, failure)) = stream.next().await {
+        while let Some((out_line, idx, has_id, added, failure)) = stream.next().await {
             writer.write_raw(&out_line).context(format!("writing line {idx}"))?;
             processed += 1;
 
             stats.total_input += 1;
             if has_id { stats.with_ids += 1; }
-            stats.total_episodes += ep_count;
-            stats.episodes_found += found;
             stats.failures += failure;
+            let _ = added;
 
             if processed.is_multiple_of(50) && let Err(e) = writer.flush() {
                 tracing::warn!("TVDB: flush error at line {idx}: {e}");
@@ -793,7 +626,6 @@ impl Phase for TvdbEnrichPhase {
                     Some(start),
                     &[
                         ("with_ids", stats.with_ids),
-                        ("eps_found", stats.episodes_found),
                         ("failures", stats.failures),
                     ],
                 );
@@ -804,9 +636,9 @@ impl Phase for TvdbEnrichPhase {
         let total_written = start_from + processed;
 
         tracing::info!(
-            "TVDB complete: {} input, {} written.  TVDB IDs: {}, eps found: {} entries ({} total episodes), failures: {}",
+            "TVDB complete: {} input, {} written.  TVDB IDs: {}, failures: {} (artwork-only phase)",
             stats.total_input, total_written,
-            stats.with_ids, stats.episodes_found, stats.total_episodes, stats.failures,
+            stats.with_ids, stats.failures,
         );
 
         if let crate::checkpoint::PhaseState::Simple(s) =
@@ -847,92 +679,6 @@ mod tests {
         assert!(bucket.try_consume());
         assert!(bucket.try_consume());
         assert!(!bucket.try_consume());
-    }
-
-    // ── Date parsing ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_parse_tvdb_date_full() {
-        let d = parse_tvdb_date("2022-01-15").unwrap();
-        assert_eq!(d.year, 2022);
-        assert_eq!(d.month, Some(1));
-        assert_eq!(d.day, Some(15));
-    }
-
-    #[test]
-    fn test_parse_tvdb_date_invalid() {
-        assert!(parse_tvdb_date("not-a-date").is_none());
-        assert!(parse_tvdb_date("2022-01").is_none());
-        assert!(parse_tvdb_date("").is_none());
-    }
-
-    // ── Episode mapping ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_map_tvdb_episodes_basic() {
-        let tvdb_eps = vec![
-            TvdbEpisode {
-                id: Some(100),
-                number: Some(1),
-                absolute_number: Some(1),
-                season_number: Some(1),
-                name: Some("Episode 1".to_string()),
-                overview: Some("First episode".to_string()),
-                aired: Some("2022-01-15".to_string()),
-                runtime: Some(24),
-            },
-            TvdbEpisode {
-                id: Some(101),
-                number: Some(2),
-                absolute_number: None,
-                season_number: Some(1),
-                name: Some("Episode 2".to_string()),
-                overview: None,
-                aired: Some("2022-01-22".to_string()),
-                runtime: Some(24),
-            },
-        ];
-
-        let eps = map_tvdb_episodes(&tvdb_eps);
-        assert_eq!(eps.len(), 2);
-
-        assert_eq!(eps[0].number, 1);
-        assert_eq!(eps[0].absolute, Some(1));
-        assert_eq!(eps[0].season_number, Some(1));
-        assert_eq!(eps[0].titles.as_ref().unwrap().english.as_deref(), Some("Episode 1"));
-        assert_eq!(eps[0].overview.as_deref(), Some("First episode"));
-        assert_eq!(eps[0].air_date.as_ref().unwrap().year, 2022);
-        assert_eq!(eps[0].runtime, Some(24));
-        assert_eq!(eps[0].ids.as_ref().unwrap().tvdb, 100);
-    }
-
-    #[test]
-    fn test_map_tvdb_episodes_skips_missing_number_or_id() {
-        let tvdb_eps = vec![
-            TvdbEpisode { id: None, number: Some(1), ..Default::default() },
-            TvdbEpisode { id: Some(100), number: None, ..Default::default() },
-            TvdbEpisode { id: Some(101), number: Some(3), ..Default::default() },
-        ];
-
-        let eps = map_tvdb_episodes(&tvdb_eps);
-        assert_eq!(eps.len(), 1);
-        assert_eq!(eps[0].number, 3);
-    }
-
-    #[test]
-    fn test_map_tvdb_episodes_empty() {
-        let eps = map_tvdb_episodes(&[]);
-        assert!(eps.is_empty());
-    }
-
-    #[test]
-    fn test_tvdb_episode_response_null_data() {
-        // TVDB returns `{"data": null}` for some series (e.g. placeholder
-        // entries). Deserialization must not fail; episodes default to empty.
-        let body: TvdbEpisodeResponse = serde_json::from_str(r#"{"data": null}"#).unwrap();
-        assert!(body.data.is_none());
-        let eps: Vec<TvdbEpisode> = body.data.map(|d| d.episodes).unwrap_or_default();
-        assert!(eps.is_empty());
     }
 
     #[test]

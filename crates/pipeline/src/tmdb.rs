@@ -8,7 +8,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use anigraph_model::{Artwork, ArtworkProvider, ArtworkType};
+use anigraph_model::{
+    Artwork, ArtworkProvider, ArtworkType, Episode, EpisodeIds, EpisodeRating, EpisodeTitle,
+    FuzzyDate,
+};
 
 use crate::checkpoint::{Checkpoint, PhaseId};
 use crate::jsonl_writer::JsonlWriter;
@@ -35,6 +38,9 @@ const TMDB_MAX_RETRIES: u32 = 3;
 const MAX_POSTERS: usize = 10;
 const MAX_BACKDROPS: usize = 5;
 const MAX_LOGOS: usize = 5;
+
+/// Safety cap on seasons fetched per show when collecting episodes.
+const MAX_SEASONS_PER_SHOW: usize = 60;
 
 const ANIME_CROSSREF: &str = "anime-crossref.jsonl";
 const ANIME_TMDB: &str = "anime-tmdb.jsonl";
@@ -77,6 +83,9 @@ impl TokenBucket {
 struct TmdbTvResponse {
     #[serde(default)]
     images: TmdbImages,
+    /// Season list — used to discover which seasons to fetch episodes for.
+    #[serde(default)]
+    seasons: Vec<TmdbSeasonSummary>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +93,46 @@ struct TmdbTvResponse {
 struct TmdbMovieResponse {
     #[serde(default)]
     images: TmdbImages,
+}
+
+/// Season entry inside the `/tv/{id}` response.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TmdbSeasonSummary {
+    season_number: Option<i32>,
+    #[serde(default)]
+    episode_count: Option<i32>,
+}
+
+/// Response of `/tv/{id}/season/{n}`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TmdbSeasonResponse {
+    #[serde(default)]
+    episodes: Vec<TmdbEpisodeDto>,
+}
+
+/// Episode record inside a season response.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TmdbEpisodeDto {
+    id: Option<i64>,
+    episode_number: Option<i32>,
+    season_number: Option<i32>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    overview: Option<String>,
+    #[serde(default)]
+    air_date: Option<String>,
+    #[serde(default)]
+    runtime: Option<i32>,
+    #[serde(default)]
+    vote_average: Option<f64>,
+    #[serde(default)]
+    vote_count: Option<i64>,
+    #[serde(default)]
+    still_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -280,6 +329,126 @@ async fn fetch_movie(
     Ok(Some(resp.json().await.with_context(|| format!("TMDB movie {id} parse failed"))?))
 }
 
+/// Fetch all seasons' episodes for a show, in parallel.
+///
+/// Season 0 (specials) is included — the caller decides how to order/keep it.
+/// Seasons with zero episodes are skipped.  Bounded by `MAX_SEASONS_PER_SHOW`.
+async fn fetch_show_episodes(
+    http: &reqwest::Client,
+    api_key: &str,
+    bucket: &Mutex<TokenBucket>,
+    tv_id: i32,
+    seasons: &[TmdbSeasonSummary],
+) -> Result<Vec<Episode>> {
+    let season_numbers: Vec<i32> = seasons
+        .iter()
+        .filter(|s| s.episode_count.unwrap_or(0) > 0)
+        .filter_map(|s| s.season_number)
+        .take(MAX_SEASONS_PER_SHOW)
+        .collect();
+
+    if season_numbers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let fetches = season_numbers.iter().map(|sn| {
+        fetch_season(http, api_key, bucket, tv_id, *sn)
+    });
+    let results = futures::future::join_all(fetches).await;
+
+    let mut episodes = Vec::new();
+    for (sn, res) in season_numbers.iter().zip(results) {
+        match res {
+            Ok(Some(season)) => {
+                episodes.extend(map_tmdb_episodes(*sn, &season.episodes));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // One bad season shouldn't kill the whole show.
+                tracing::warn!("TMDB TV {tv_id} season {sn}: {e:#}");
+            }
+        }
+    }
+    episodes.sort_by_key(|e| (e.season_number.unwrap_or(0), e.number));
+    Ok(episodes)
+}
+
+async fn fetch_season(
+    http: &reqwest::Client,
+    api_key: &str,
+    bucket: &Mutex<TokenBucket>,
+    tv_id: i32,
+    season_number: i32,
+) -> Result<Option<TmdbSeasonResponse>> {
+    let mut url = format!("{TMDB_BASE_URL}/tv/{tv_id}/season/{season_number}");
+    if is_v3_api_key(api_key) {
+        url.push_str(&format!("?api_key={api_key}"));
+    }
+    let label = format!("TMDB TV {tv_id} season {season_number}");
+    let resp = fetch_with_retry(http, api_key, bucket, &url, &label).await?;
+
+    if resp.status().as_u16() == 404 {
+        return Ok(None);
+    }
+    Ok(Some(
+        resp.json()
+            .await
+            .with_context(|| format!("{label} parse failed"))?,
+    ))
+}
+
+/// Parse a TMDB air date (`YYYY-MM-DD`) into a [`FuzzyDate`].
+fn parse_tmdb_date(s: &str) -> Option<FuzzyDate> {
+    let mut parts = s.split('-');
+    let year: i32 = parts.next()?.parse().ok()?;
+    let month: i32 = parts.next()?.parse().ok()?;
+    let day: i32 = parts.next()?.parse().ok()?;
+    Some(FuzzyDate { year, month: Some(month), day: Some(day) })
+}
+
+/// Convert a season's TMDB episode records into model [`Episode`]s.
+fn map_tmdb_episodes(season_number: i32, dtos: &[TmdbEpisodeDto]) -> Vec<Episode> {
+    dtos
+        .iter()
+        .filter_map(|dto| {
+            let number = dto.episode_number?;
+            let name = dto.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let overview = dto
+                .overview
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+
+            let rating = match (dto.vote_average, dto.vote_count) {
+                (Some(avg), Some(count)) if count > 0 => {
+                    Some(EpisodeRating { average: avg, count: Some(count) })
+                }
+                _ => None,
+            };
+
+            Some(Episode {
+                number,
+                absolute: None,
+                season_number: dto.season_number.or(Some(season_number)),
+                titles: name.map(|n| EpisodeTitle {
+                    english: Some(n.to_string()),
+                    native: None,
+                    romaji: None,
+                }),
+                air_date: dto.air_date.as_deref().and_then(parse_tmdb_date),
+                runtime: dto.runtime,
+                overview: overview.map(String::from),
+                rating,
+                image: dto
+                    .still_path
+                    .as_deref()
+                    .map(|p| format!("{TMDB_IMAGE_URL}{p}")),
+                ids: dto.id.map(|id| EpisodeIds { tmdb: Some(id as i32), ..Default::default() }),
+            })
+        })
+        .collect()
+}
+
 // ── Enrichment function ────────────────────────────────────────────────────
 
 /// Per-entry TMDB enrichment result.
@@ -291,6 +460,8 @@ struct EnrichResult {
     poster_count: usize,
     backdrop_count: usize,
     logo_count: usize,
+    /// Episodes fetched from TMDB season endpoints.
+    episode_count: usize,
     /// Did any API call fail (network, 5xx) after exhausting retries?
     failure_occurred: bool,
 }
@@ -321,6 +492,7 @@ async fn enrich_entry(
             poster_count: 0,
             backdrop_count: 0,
             logo_count: 0,
+            episode_count: 0,
             failure_occurred: false,
         };
     }
@@ -329,8 +501,9 @@ async fn enrich_entry(
     let mut poster_count = 0usize;
     let mut backdrop_count = 0usize;
     let mut logo_count = 0usize;
+    let mut episode_count = 0usize;
 
-    // Fetch TV series artwork
+    // Fetch TV series artwork + episodes
     if let Some(tv_id) = tmdb_tv {
         match fetch_tv(http, api_key, bucket, tv_id).await {
             Ok(Some(resp)) => {
@@ -340,6 +513,28 @@ async fn enrich_entry(
                 logo_count += lc;
                 if !artworks.is_empty() {
                     merge_artwork(&mut entry, artworks);
+                }
+                // ── Episodes ────────────────────────────────────────────
+                match fetch_show_episodes(http, api_key, bucket, tv_id, &resp.seasons).await {
+                    Ok(eps) if !eps.is_empty() => {
+                        episode_count = eps.len();
+                        match serde_json::to_value(&eps) {
+                            Ok(v) => entry["episodes"] = v,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "TMDB: entry {anilist_id} (TV {tv_id}) episode serialize failed: {e}"
+                                );
+                                failure_occurred = true;
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "TMDB: entry {anilist_id} (TV {tv_id}) episode fetch failed: {e:#}"
+                        );
+                        failure_occurred = true;
+                    }
                 }
             }
             Ok(None) => { /* 404 — stale cross-ref */ }
@@ -372,7 +567,7 @@ async fn enrich_entry(
 
     let artwork_added = poster_count + backdrop_count + logo_count > 0;
 
-    if artwork_added
+    if (artwork_added || episode_count > 0)
         && let Some(sources) = entry["sources"].as_array_mut()
             && !sources.iter().any(|s| s == "tmdb") {
                 sources.push(Value::String("tmdb".to_string()));
@@ -384,6 +579,7 @@ async fn enrich_entry(
         poster_count,
         backdrop_count,
         logo_count,
+        episode_count,
         failure_occurred,
     }
 }
@@ -473,7 +669,8 @@ impl Phase for TmdbEnrichPhase {
         let api_key = api_key.clone();
 
         // ── Ordered buffered processing ─────────────────────────────────
-        // Each stream item returns: (out_line, idx, has_tv_id, has_movie_ids, artwork_added, poster, backdrop, logo, failure_occurred)
+        // Each stream item returns: (out_line, idx, has_tv_id, has_movie_ids, artwork_added,
+        // poster, backdrop, logo, failure_occurred, episode_count)
         let stream = futures::stream::iter(lines.into_iter().enumerate().map(
             |(offset, line)| {
                 let http = http.clone();
@@ -487,7 +684,7 @@ impl Phase for TmdbEnrichPhase {
                         Ok(v) => v,
                         Err(e) => {
                             tracing::warn!("TMDB: malformed JSON at line {idx}: {e}");
-                            return (line, idx, false, false, 0u64, 0u64, 0u64, 0u64, 0u64);
+                            return (line, idx, false, false, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
                         }
                     };
 
@@ -504,7 +701,7 @@ impl Phase for TmdbEnrichPhase {
 
                     (out_line, idx, has_tv_id, has_movie_ids,
                      result.poster_count as u64, result.backdrop_count as u64, result.logo_count as u64,
-                     failure, artwork_added)
+                     failure, artwork_added, result.episode_count as u64)
                 }
             },
         ))
@@ -519,9 +716,11 @@ impl Phase for TmdbEnrichPhase {
 
         let mut stats = TmdbPhaseStats::default();
         let mut processed = 0u64;
+        let mut total_episodes = 0u64;
+        let mut entries_with_episodes = 0u64;
 
         tokio::pin!(stream);
-        while let Some((out_line, idx, has_tv, has_movie, posters, backdrops, logos, failure, added)) = stream.next().await {
+        while let Some((out_line, idx, has_tv, has_movie, posters, backdrops, logos, failure, added, eps)) = stream.next().await {
             writer.write_raw(&out_line).context(format!("writing line {idx}"))?;
             processed += 1;
 
@@ -533,6 +732,8 @@ impl Phase for TmdbEnrichPhase {
             stats.total_backdrop_count += backdrops;
             stats.total_logo_count += logos;
             stats.failures += failure;
+            total_episodes += eps;
+            if eps > 0 { entries_with_episodes += 1; }
 
             // Periodically report progress + stats
             if processed.is_multiple_of(1000) {
@@ -548,6 +749,7 @@ impl Phase for TmdbEnrichPhase {
                         ("TV", stats.with_tv_ids),
                         ("movie", stats.with_movie_ids),
                         ("artwork", stats.artwork_found),
+                        ("episodes", total_episodes),
                         ("failures", stats.failures),
                     ],
                 );
@@ -559,10 +761,11 @@ impl Phase for TmdbEnrichPhase {
 
         tracing::info!(
             "TMDB complete: {} input, {} written.  TV IDs: {}, Movie IDs: {}, artwork found: {}, \
-             total images: {}p+{}b+{}l, failures: {}",
+             total images: {}p+{}b+{}l, episodes: {} across {} shows, failures: {}",
             stats.total_input, total_written,
             stats.with_tv_ids, stats.with_movie_ids, stats.artwork_found,
             stats.total_poster_count, stats.total_backdrop_count, stats.total_logo_count,
+            total_episodes, entries_with_episodes,
             stats.failures,
         );
 

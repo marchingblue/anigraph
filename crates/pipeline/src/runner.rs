@@ -1,27 +1,23 @@
 use anyhow::{Context, Result};
 
+use crate::anizip::AnizipEnrichPhase;
 use crate::checkpoint::{Checkpoint, PhaseId};
 use crate::crossref::CrossRefPhase;
 use crate::enumerate::{EnumeratePhase, MediaType};
 use crate::output::OutputPhase;
 use crate::phase::{Phase, PipelineConfig};
-use crate::stats::{AnilistPhaseStats, CrossrefPhaseStats, PipelineStats, TmdbPhaseStats, TvdbPhaseStats};
 use crate::tmdb::TmdbEnrichPhase;
 use crate::tvdb::TvdbEnrichPhase;
 
-/// Run the full pipeline: enumerate → cross-ref → TMDB → TVDB.
+/// Run the full pipeline: enumerate → cross-ref → TMDB → TVDB → ani.zip.
 ///
 /// Each phase runs to completion (or is skipped if already completed).
-/// The checkpoint is saved after every phase so a crash mid-pipeline
-/// only loses the in-flight phase's progress.
-///
-/// Returns aggregate stats for the entire run.
-pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineStats> {
-    let mut stats = PipelineStats::new();
-
+/// CI always runs fresh: checkpoint persistence is disabled and any stale
+/// checkpoint file from an earlier version is removed up front.
+pub async fn run_pipeline(config: &PipelineConfig) -> Result<()> {
     // ── Single-instance lock ────────────────────────────────────────
     // Prevent two runs (e.g. an orphaned child from a killed `cargo run`
-    // racing a fresh `--resume`) from writing the same work dir.
+    // racing a fresh start) from writing the same work dir.
     #[cfg(unix)]
     let _lock = crate::lock::acquire(&config.work_dir)?;
 
@@ -29,18 +25,11 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineStats> {
     std::fs::create_dir_all(&config.work_dir)
         .context("creating work directory")?;
 
-    let mut checkpoint = if config.resume && config.checkpoint_path.exists() {
-        tracing::info!("Loading checkpoint from {}", config.checkpoint_path.display());
-        Checkpoint::load(&config.checkpoint_path)
-            .context("loading checkpoint")?
-    } else if config.resume {
-        anyhow::bail!(
-            "resume requested but checkpoint not found at {}",
-            config.checkpoint_path.display()
-        );
-    } else {
-        Checkpoint::new()
-    };
+    // Checkpointing is disabled (no resume in CI): drop stale state and
+    // keep phase progress in memory only.
+    let _ = std::fs::remove_file(&config.checkpoint_path);
+    Checkpoint::set_persistence(false);
+    let mut checkpoint = Checkpoint::new();
 
     // ── Phase 1: Anime enumeration (skippable) ─────────────────────────
     if config.skip_enumeration {
@@ -119,31 +108,23 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineStats> {
         tracing::info!("TMDB_API_KEY not set — skipping TMDB enrichment");
     }
 
-    // ── Phase 5: TVDB enrichment (only if API key is set) ──────────────
+    // ── Phase 5: TVDB enrichment — artwork only (requires API key) ─────
     if config.tvdb_api_key.is_some() {
         run_phase(&TvdbEnrichPhase, config, &mut checkpoint).await?;
     } else {
         tracing::info!("TVDB_API_KEY not set — skipping TVDB enrichment");
     }
 
-    // ── Phase 6: Output (compress + checksum) ─────────────────────────
+    // ── Phase 6: ani.zip enrichment (episodes fill-in + AniDB coverage) ──
+    run_phase(&AnizipEnrichPhase, config, &mut checkpoint).await?;
+
+    // ── Phase 7: Output (compress + checksum) ─────────────────────────
     run_phase(&OutputPhase, config, &mut checkpoint).await?;
-
-    // ── Build stats from checkpoint ───────────────────────────────────
-    build_stats(&checkpoint, &mut stats);
-
-    // ── Write stats.json ───────────────────────────────────────────────
-    let stats_path = config.output_dir.join("stats.json");
-    let stats_json = serde_json::to_string_pretty(&stats)
-        .context("serializing pipeline stats")?;
-    std::fs::write(&stats_path, &stats_json)
-        .context(format!("writing stats to {}", stats_path.display()))?;
-    tracing::info!("Stats written to {}", stats_path.display());
 
     // ── Final summary ─────────────────────────────────────────────────
     summarize(&checkpoint);
 
-    Ok(stats)
+    Ok(())
 }
 
 /// Run a single phase with progress logging and checkpoint saving.
@@ -187,48 +168,10 @@ async fn run_phase(
     Ok(count)
 }
 
-/// Build `PipelineStats` from checkpoint data.
-///
-/// Each phase tracks item counts in the checkpoint; this extracts them into
-/// the typed stats structs.  Detailed per-phase stats (image counts, episode
-/// counts) are left at default until the phases export them explicitly.
 fn count_jsonl_lines(path: &std::path::Path) -> Result<u64> {
     let reader = std::fs::File::open(path)?;
     let buf = std::io::BufReader::new(reader);
     Ok(std::io::BufRead::lines(buf).map_while(|l| l.ok()).count() as u64)
-}
-
-fn build_stats(checkpoint: &Checkpoint, stats: &mut PipelineStats) {
-    stats.generated_at = chrono::Utc::now().to_rfc3339();
-
-    fn get_count(ckpt: &Checkpoint, id: &PhaseId) -> u64 {
-        match ckpt.phases.get(id) {
-            Some(crate::checkpoint::PhaseState::Paginated(s)) => s.items_written,
-            Some(crate::checkpoint::PhaseState::Simple(s)) => s.completed,
-            None => 0,
-        }
-    }
-
-    stats.anilist_anime = AnilistPhaseStats {
-        total_entries: get_count(checkpoint, &PhaseId::AnilistAnime),
-    };
-    stats.anilist_manga = AnilistPhaseStats {
-        total_entries: get_count(checkpoint, &PhaseId::AnilistManga),
-    };
-    stats.fribb_crossref = CrossrefPhaseStats {
-        total_input: get_count(checkpoint, &PhaseId::FribbCrossref),
-        matched: 0,   // TODO: extract from crossref phase when it exports stats
-        unmatched: 0,
-        unmatched_percent: 0.0,
-    };
-    stats.tmdb_enrich = TmdbPhaseStats {
-        total_input: get_count(checkpoint, &PhaseId::TmdbEnrich),
-        ..Default::default()
-    };
-    stats.tvdb_enrich = TvdbPhaseStats {
-        total_input: get_count(checkpoint, &PhaseId::TvdbEnrich),
-        ..Default::default()
-    };
 }
 
 /// Log a summary of all phases and their status.

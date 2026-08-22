@@ -268,6 +268,60 @@ pub struct Tag {
     pub rank: Option<i32>,
 }
 
+// ── Language normalization ───────────────────────────────────────────────────
+
+/// Normalize a provider-specific language code to lowercase ISO-639-1.
+///
+/// TMDB already emits ISO-639-1 (`ja`, `en`); TVDB emits ISO-639-2/B
+/// (`jpn`, `eng`) plus a few nonstandard codes (`zhtw`). Region-qualified
+/// codes like `pt-BR` pass through with normalized casing. Unknown codes are
+/// lowercased unchanged so no data is lost.
+pub fn normalize_language(code: &str) -> String {
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    let mapped = match lowered.as_str() {
+        "eng" => "en",
+        "jpn" => "ja",
+        "fra" | "fre" => "fr",
+        "deu" | "ger" => "de",
+        "spa" => "es",
+        "ita" => "it",
+        "por" => "pt",
+        "pol" => "pl",
+        "rus" => "ru",
+        "nld" | "dut" => "nl",
+        "swe" => "sv",
+        "dan" => "da",
+        "nor" | "nob" | "nno" => "no",
+        "fin" => "fi",
+        "ell" | "gre" => "el",
+        "hun" => "hu",
+        "ces" | "cze" => "cs",
+        "tur" => "tr",
+        "ara" => "ar",
+        "heb" => "he",
+        "tha" => "th",
+        "vie" => "vi",
+        "ukr" => "uk",
+        "bul" => "bg",
+        "hrv" => "hr",
+        "kat" | "geo" => "ka",
+        "kor" => "ko",
+        "zho" | "chi" => "zh",
+        // TVDB's nonstandard Traditional-Chinese tag.
+        "zhtw" => "zh-TW",
+        _ => {
+            // Pass through: keep known-good forms like "pt-BR", lowercase
+            // everything else.
+            return lowered;
+        }
+    };
+    mapped.to_string()
+}
+
 // ── Enums shared by Anime + Manga ────────────────────────────────────────────
 
 /// Media format. AniList-sourced — catch-all for resilience to new values.

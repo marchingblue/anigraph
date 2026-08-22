@@ -219,6 +219,12 @@ impl Phase for EnumeratePhase {
             JsonlWriter::new(&output_path)?
         };
 
+        // Duplicate guard: the same AniList ID must never be written twice.
+        // (AniList pagination is normally stable, but restarts/rate-limit
+        // retries have historically produced byte-identical duplicate lines.)
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut duplicates = 0u64;
+
         // ── Main fetch loop (sequential ID-window sweep) ───────────────
         // Walk the ID space in fixed windows using `id_in`. Within each window
         // we paginate with `page` until `hasNextPage` is false. After every
@@ -308,6 +314,14 @@ impl Phase for EnumeratePhase {
                                 tracing::warn!("anime entry missing id at window id>={window_start}, page={page}, idx={idx}, id={mid}");
                                 continue;
                             };
+                            if !seen_ids.insert(entry.id) {
+                                duplicates += 1;
+                                tracing::warn!(
+                                    "duplicate anime id {} at window id>={window_start} page {page} — skipping",
+                                    entry.id
+                                );
+                                continue;
+                            }
                             writer.write(&entry)
                                 .context(format!("writing anime entry {} to output", entry.id))?;
                         }
@@ -317,6 +331,14 @@ impl Phase for EnumeratePhase {
                                 tracing::warn!("manga entry missing id at window id>={window_start}, page={page}, idx={idx}, id={mid}");
                                 continue;
                             };
+                            if !seen_ids.insert(entry.id) {
+                                duplicates += 1;
+                                tracing::warn!(
+                                    "duplicate manga id {} at window id>={window_start} page {page} — skipping",
+                                    entry.id
+                                );
+                                continue;
+                            }
                             writer.write(&entry)
                                 .context(format!("writing manga entry {} to output", entry.id))?;
                         }
@@ -366,7 +388,12 @@ impl Phase for EnumeratePhase {
         writer.flush()?;
 
         let total = checkpoint.items_written(&id);
-        tracing::info!("{} complete: {} entries written", self.name(), total);
+        tracing::info!(
+            "{} complete: {} entries written, {} duplicates skipped",
+            self.name(),
+            total,
+            duplicates
+        );
         Ok(total)
     }
 }
@@ -616,7 +643,13 @@ pub fn anilist_media_to_anime_entry(media: &Value) -> Option<AnimeEntry> {
             .filter(|a| !a.is_empty())
             .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect()),
 
-        description: media["description"].as_str().map(String::from),
+        description: media["description"]
+            .as_str()
+            .map(str::trim)
+            // Normalize empty/blank descriptions to None so the dataset
+            // never carries `"description": ""`.
+            .filter(|d| !d.is_empty())
+            .map(String::from),
 
         format: match media["format"].as_str() {
             Some("TV") => anigraph_model::AnimeFormat::Tv,
@@ -755,7 +788,13 @@ pub fn anilist_media_to_manga_entry(media: &Value) -> Option<MangaEntry> {
             .filter(|a| !a.is_empty())
             .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect()),
 
-        description: media["description"].as_str().map(String::from),
+        description: media["description"]
+            .as_str()
+            .map(str::trim)
+            // Normalize empty/blank descriptions to None so the dataset
+            // never carries `"description": ""`.
+            .filter(|d| !d.is_empty())
+            .map(String::from),
 
         format: match media["format"].as_str() {
             Some("MANGA") => MangaFormat::Manga,

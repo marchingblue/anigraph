@@ -76,8 +76,13 @@ pub struct AnimeEntry {
     pub episodes: Option<Vec<Episode>>,
 }
 
-/// Per-episode metadata, sourced from TVDB API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Per-episode metadata.
+///
+/// Primary source is TMDB (`/tv/{id}/season/{n}`); ani.zip (AniDB-derived)
+/// fills multilanguage titles, AniDB summaries/ratings, and covers series
+/// that TMDB doesn't know.  All fields except `number` are optional and
+/// omitted when absent — never serialized as empty strings or nulls.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Episode {
     pub number: i32,
@@ -89,16 +94,23 @@ pub struct Episode {
     pub titles: Option<EpisodeTitle>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub air_date: Option<FuzzyDate>,
+    /// Runtime in minutes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<i32>,
-    /// Episode synopsis / description from TVDB.
+    /// Episode synopsis / description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overview: Option<String>,
+    /// Community rating for this episode (e.g. TMDB vote average).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating: Option<EpisodeRating>,
+    /// Episode still/thumbnail image URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ids: Option<EpisodeIds>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EpisodeTitle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,8 +121,26 @@ pub struct EpisodeTitle {
     pub romaji: Option<String>,
 }
 
+/// Per-episode community rating.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EpisodeRating {
+    /// Average score (TMDB vote_average / AniDB rating), 0–10 scale.
+    pub average: f64,
+    /// Number of votes contributing to the average, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EpisodeIds {
-    pub tvdb: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tvdb: Option<i32>,
+    /// TMDB episode id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmdb: Option<i32>,
+    /// AniDB episode id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anidb: Option<i32>,
 }

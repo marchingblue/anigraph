@@ -36,10 +36,6 @@ struct Cli {
     #[arg(long, default_value = "data")]
     output_dir: PathBuf,
 
-    /// Resume from the last checkpoint (requires checkpoint file).
-    #[arg(long)]
-    resume: bool,
-
     /// Skip animation/manga enumeration.  Assumes anime-base.jsonl and
     /// manga-base.jsonl exist in --work-dir and starts from cross-ref.
     #[arg(long)]
@@ -85,7 +81,7 @@ fn main() -> Result<()> {
         output_dir: cli.output_dir,
         checkpoint_path: work_dir.join("anigraph-checkpoint.json"),
         fribb_path: cli.fribb_path,
-        resume: cli.resume,
+        resume: false,
         skip_enumeration: cli.skip_enumeration,
         tmdb_api_key: std::env::var("TMDB_READ_KEY")
             .ok()
@@ -110,13 +106,12 @@ fn main() -> Result<()> {
     // ── Run pipeline ──────────────────────────────────────────────────
     tracing::info!("anigraph v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!("Work dir: {}", config.work_dir.display());
-    tracing::info!("Resume:   {}", config.resume);
     tracing::info!("Skip enum: {}", config.skip_enumeration);
 
     let runtime = tokio::runtime::Runtime::new()?;
-    let stats = runtime.block_on(run_pipeline(&config))?;
+    runtime.block_on(run_pipeline(&config))?;
 
-    tracing::info!("Pipeline complete. Session: {}", stats.generated_at);
+    tracing::info!("Pipeline complete.");
 
     Ok(())
 }

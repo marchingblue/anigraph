@@ -19,19 +19,75 @@
       "description": "Providers that contributed data to this entry.",
       "items": {
         "type": "string",
-        "enum": ["anilist", "fribb", "tvdb", "tmdb"]
+        "enum": [
+          "anilist",
+          "fribb",
+          "tvdb",
+          "tmdb",
+          "anizip"
+        ]
       }
     },
     "ids": {
       "type": "object",
       "description": "Cross-database identifiers.",
       "properties": {
-        "mal": { "type": "integer", "description": "MyAnimeList ID" },
-        "anidb": { "type": "integer", "description": "AniDB series ID" },
-        "kitsu": { "type": "integer", "description": "Kitsu ID" },
-        "tvdb": { "type": "integer", "description": "TheTVDB ID" },
-        "tmdb": { "type": "integer", "description": "TMDB ID" },
-        "imdb": { "type": "string", "pattern": "^tt\\d+$", "description": "IMDb ID (e.g., tt0213338)" }
+        "mal": {
+          "type": "integer",
+          "description": "MyAnimeList ID (AniList idMal + Fribb)"
+        },
+        "anidb": {
+          "type": "integer",
+          "description": "AniDB ID"
+        },
+        "kitsu": {
+          "type": "integer",
+          "description": "Kitsu ID"
+        },
+        "tvdb": {
+          "type": "integer",
+          "description": "TheTVDB series ID"
+        },
+        "tmdbTv": {
+          "type": "integer",
+          "description": "TMDB TV series ID — hits /tv/{id}"
+        },
+        "tmdbMovie": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "TMDB movie IDs — hits /movie/{id}; a single anime movie can map to several"
+        },
+        "imdb": {
+          "type": "string",
+          "pattern": "^tt\\d+$",
+          "description": "IMDb ID (e.g., tt0213338)"
+        },
+        "animePlanet": {
+          "type": "string",
+          "description": "Anime-Planet slug (e.g. cowboy-bebop)"
+        },
+        "anisearch": {
+          "type": "integer",
+          "description": "anisearch ID"
+        },
+        "livechart": {
+          "type": "integer",
+          "description": "LiveChart ID"
+        },
+        "simkl": {
+          "type": "integer",
+          "description": "SIMKL ID"
+        },
+        "animenewsnetwork": {
+          "type": "integer",
+          "description": "Anime News Network ID"
+        },
+        "animecountdown": {
+          "type": "integer",
+          "description": "AnimeCountdown ID"
+        }
       },
       "additionalProperties": false
     },
@@ -39,17 +95,30 @@
       "type": "object",
       "description": "Canonical title object.",
       "properties": {
-        "romaji": { "type": "string", "description": "Romaji title (e.g., Cowboy Bebop)" },
-        "english": { "type": "string", "description": "English title" },
-        "native": { "type": "string", "description": "Native script title (e.g., カウボーイビバップ)" }
+        "romaji": {
+          "type": "string",
+          "description": "Romaji title (e.g., Cowboy Bebop)"
+        },
+        "english": {
+          "type": "string",
+          "description": "English title"
+        },
+        "native": {
+          "type": "string",
+          "description": "Native script title (e.g., カウボーイビバップ)"
+        }
       },
-      "required": ["romaji"],
+      "required": [
+        "romaji"
+      ],
       "additionalProperties": false
     },
     "synonyms": {
       "type": "array",
       "description": "Alternative titles for search/fuzzy matching.",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "description": {
       "type": "string",
@@ -58,7 +127,15 @@
     "format": {
       "type": "string",
       "description": "Media format.",
-      "enum": ["TV", "MOVIE", "OVA", "ONA", "SPECIAL", "MUSIC", "TV_SHORT"]
+      "enum": [
+        "TV",
+        "MOVIE",
+        "OVA",
+        "ONA",
+        "SPECIAL",
+        "MUSIC",
+        "TV_SHORT"
+      ]
     },
     "episodesCount": {
       "type": "integer",
@@ -73,24 +150,64 @@
     "status": {
       "type": "string",
       "description": "Release status.",
-      "enum": ["FINISHED", "RELEASING", "NOT_YET_RELEASED", "CANCELLED", "HIATUS"]
+      "enum": [
+        "FINISHED",
+        "RELEASING",
+        "NOT_YET_RELEASED",
+        "CANCELLED",
+        "HIATUS"
+      ]
     },
     "source": {
       "type": "string",
       "description": "Original source material.",
-      "enum": ["ORIGINAL", "MANGA", "LIGHT_NOVEL", "VISUAL_NOVEL", "VIDEO_GAME", "OTHER", "NOVEL", "DOUJIN", "WEB_MANGA", "MUSIC", "PRINT", "COMIC", "BOOK", "CARD_GAME", "MIXED_MEDIA", "RADIO", "PICTURE_BOOK"]
+      "enum": [
+        "ORIGINAL",
+        "MANGA",
+        "LIGHT_NOVEL",
+        "VISUAL_NOVEL",
+        "VIDEO_GAME",
+        "OTHER",
+        "NOVEL",
+        "DOUJIN",
+        "WEB_MANGA",
+        "MUSIC",
+        "PRINT",
+        "COMIC",
+        "BOOK",
+        "CARD_GAME",
+        "MIXED_MEDIA",
+        "RADIO",
+        "PICTURE_BOOK"
+      ]
     },
     "ageRating": {
       "type": "string",
       "description": "Content rating.",
-      "enum": ["G", "PG", "R", "R18", "R18+"]
+      "enum": [
+        "G",
+        "PG",
+        "R",
+        "R18",
+        "R18+"
+      ]
     },
     "season": {
       "type": "object",
       "description": "Airing season.",
       "properties": {
-        "season": { "type": "string", "enum": ["WINTER", "SPRING", "SUMMER", "FALL"] },
-        "year": { "type": "integer" }
+        "season": {
+          "type": "string",
+          "enum": [
+            "WINTER",
+            "SPRING",
+            "SUMMER",
+            "FALL"
+          ]
+        },
+        "year": {
+          "type": "integer"
+        }
       },
       "additionalProperties": false
     },
@@ -98,20 +215,30 @@
       "type": "object",
       "description": "Airing timeline.",
       "properties": {
-        "start": { "$ref": "#/definitions/FuzzyDate", "description": "Start date." },
-        "end": { "$ref": "#/definitions/FuzzyDate", "description": "End date." }
+        "start": {
+          "$ref": "#/definitions/FuzzyDate",
+          "description": "Start date."
+        },
+        "end": {
+          "$ref": "#/definitions/FuzzyDate",
+          "description": "End date."
+        }
       },
       "additionalProperties": false
     },
     "genres": {
       "type": "array",
       "description": "Curated genres.",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "tags": {
       "type": "array",
       "description": "User-contributed tags.",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "studios": {
       "type": "array",
@@ -119,10 +246,19 @@
       "items": {
         "type": "object",
         "properties": {
-          "id": { "type": "integer", "description": "AniList studio ID" },
-          "name": { "type": "string", "description": "Studio name" }
+          "id": {
+            "type": "integer",
+            "description": "AniList studio ID"
+          },
+          "name": {
+            "type": "string",
+            "description": "Studio name"
+          }
         },
-        "required": ["id", "name"],
+        "required": [
+          "id",
+          "name"
+        ],
         "additionalProperties": false
       }
     },
@@ -132,15 +268,31 @@
       "items": {
         "type": "object",
         "properties": {
-          "id": { "type": "integer", "description": "AniList staff ID" },
-          "name": { "type": "string", "description": "Staff name" },
+          "id": {
+            "type": "integer",
+            "description": "AniList staff ID"
+          },
+          "name": {
+            "type": "string",
+            "description": "Staff name"
+          },
           "role": {
             "type": "string",
             "description": "Role string from AniList allowlist.",
-            "enum": ["Story & Art", "Story", "Art", "Original Creator", "Original Story"]
+            "enum": [
+              "Story & Art",
+              "Story",
+              "Art",
+              "Original Creator",
+              "Original Story"
+            ]
           }
         },
-        "required": ["id", "name", "role"],
+        "required": [
+          "id",
+          "name",
+          "role"
+        ],
         "additionalProperties": false
       }
     },
@@ -148,9 +300,23 @@
       "type": "object",
       "description": "Scoring data.",
       "properties": {
-        "average": { "type": "integer", "description": "Average score (0-100)", "minimum": 0, "maximum": 100 },
-        "mean": { "type": "integer", "description": "Mean score (0-100)", "minimum": 0, "maximum": 100 },
-        "popularity": { "type": "integer", "description": "Popularity count", "minimum": 0 }
+        "average": {
+          "type": "integer",
+          "description": "Average score (0-100)",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "mean": {
+          "type": "integer",
+          "description": "Mean score (0-100)",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "popularity": {
+          "type": "integer",
+          "description": "Popularity count",
+          "minimum": 0
+        }
       },
       "additionalProperties": false
     },
@@ -170,19 +336,38 @@
           "type": {
             "type": "string",
             "description": "Relation type.",
-            "enum": ["SEQUEL", "PREQUEL", "SIDE_STORY", "ADAPTATION", "SPIN_OFF", "CHARACTER", "OTHER", "SUMMARY", "ALTERNATIVE", "PARENT", "CONTAINS"]
+            "enum": [
+              "SEQUEL",
+              "PREQUEL",
+              "SIDE_STORY",
+              "ADAPTATION",
+              "SPIN_OFF",
+              "CHARACTER",
+              "OTHER",
+              "SUMMARY",
+              "ALTERNATIVE",
+              "PARENT",
+              "CONTAINS"
+            ]
           },
           "targetType": {
             "type": "string",
             "description": "Target entry type (ANIME or MANGA).",
-            "enum": ["ANIME", "MANGA"]
+            "enum": [
+              "ANIME",
+              "MANGA"
+            ]
           },
           "target": {
             "type": "integer",
             "description": "AniList ID of the related entry."
           }
         },
-        "required": ["type", "targetType", "target"],
+        "required": [
+          "type",
+          "targetType",
+          "target"
+        ],
         "additionalProperties": false
       }
     },
@@ -192,60 +377,172 @@
       "items": {
         "type": "object",
         "properties": {
-          "number": { "type": "integer", "description": "Episode number within the series." },
-          "absolute": { "type": "integer", "description": "Absolute episode number across all seasons." },
-          "seasonNumber": { "type": "integer", "description": "Season number within the series." },
+          "number": {
+            "type": "integer",
+            "description": "Episode number within the series."
+          },
+          "absolute": {
+            "type": "integer",
+            "description": "Absolute episode number across all seasons."
+          },
+          "seasonNumber": {
+            "type": "integer",
+            "description": "Season number within the series."
+          },
           "titles": {
             "type": "object",
-            "description": "Episode titles.",
+            "description": "Episode titles (english/native/romaji), populated from TMDB and ani.zip.",
             "properties": {
-              "english": { "type": "string" },
-              "native": { "type": "string" },
-              "romaji": { "type": "string" }
+              "english": {
+                "type": "string"
+              },
+              "native": {
+                "type": "string"
+              },
+              "romaji": {
+                "type": "string"
+              }
             },
             "additionalProperties": false
           },
-          "airDate": { "$ref": "#/definitions/FuzzyDate", "description": "Air date." },
-          "runtime": { "type": "integer", "description": "Runtime in minutes." },
+          "airDate": {
+            "$ref": "#/definitions/FuzzyDate",
+            "description": "Air date."
+          },
+          "runtime": {
+            "type": "integer",
+            "description": "Runtime in minutes."
+          },
           "ids": {
             "type": "object",
             "description": "Per-episode cross-database IDs.",
             "properties": {
-              "tvdb": { "type": "integer", "description": "TVDB episode ID" }
+              "tvdb": {
+                "type": "integer",
+                "description": "TVDB episode ID"
+              },
+              "tmdb": {
+                "type": "integer",
+                "description": "TMDB episode ID"
+              },
+              "anidb": {
+                "type": "integer",
+                "description": "AniDB episode ID"
+              }
             },
             "additionalProperties": false
+          },
+          "overview": {
+            "type": "string",
+            "description": "Episode synopsis / description."
+          },
+          "rating": {
+            "type": "object",
+            "description": "Community rating for this episode.",
+            "properties": {
+              "average": {
+                "type": "number",
+                "description": "Average score on a 0-10 scale."
+              },
+              "count": {
+                "type": "integer",
+                "description": "Number of votes behind the average."
+              }
+            },
+            "required": [
+              "average"
+            ],
+            "additionalProperties": false
+          },
+          "image": {
+            "type": "string",
+            "description": "Episode still/thumbnail URL."
           }
         },
-        "required": ["number"],
+        "required": [
+          "number"
+        ],
         "additionalProperties": false
       }
     }
   },
-  "required": ["id", "type", "sources", "titles", "format", "episodesCount", "status"],
+  "required": [
+    "id",
+    "type",
+    "sources",
+    "titles",
+    "format",
+    "episodesCount",
+    "status"
+  ],
   "additionalProperties": false,
   "definitions": {
     "FuzzyDate": {
       "type": "object",
       "description": "A date that may have partial precision (year-only, year+month, or full date).",
       "properties": {
-        "year": { "type": "integer" },
-        "month": { "type": "integer", "minimum": 1, "maximum": 12 },
-        "day": { "type": "integer", "minimum": 1, "maximum": 31 }
+        "year": {
+          "type": "integer"
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        },
+        "day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31
+        }
       },
-      "required": ["year"],
+      "required": [
+        "year"
+      ],
       "additionalProperties": false
     },
     "Artwork": {
       "type": "object",
       "properties": {
-        "type": { "type": "string", "enum": ["POSTER", "BANNER", "FANART", "CLEARLOGO", "BACKDROP"] },
-        "provider": { "type": "string", "enum": ["anilist", "tmdb", "tvdb"] },
-        "url": { "type": "string", "format": "uri" },
-        "width": { "type": "integer", "minimum": 0 },
-        "height": { "type": "integer", "minimum": 0 },
-        "language": { "type": "string", "pattern": "^[a-z]{2}(-[A-Z]{2})?$" }
+        "type": {
+          "type": "string",
+          "enum": [
+            "POSTER",
+            "BANNER",
+            "FANART",
+            "CLEARLOGO",
+            "BACKDROP"
+          ]
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "anilist",
+            "tmdb",
+            "tvdb"
+          ]
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "language": {
+          "type": "string",
+          "pattern": "^[a-z]{2}(-[A-Z]{2})?$"
+        }
       },
-      "required": ["type", "provider", "url"],
+      "required": [
+        "type",
+        "provider",
+        "url"
+      ],
       "additionalProperties": false
     }
   }

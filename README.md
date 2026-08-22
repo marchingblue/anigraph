@@ -24,8 +24,8 @@ The final output is two [JSON Lines](https://jsonlines.org/) files, compressed w
 
 | File | Contents |
 |------|----------|
-| `checksums.txt` | **blake3** and **sha256** hashes of compressed files |
-| `manifest.json` | Machine-readable version metadata (entry counts, file sizes, hashes) |
+| `checksums.txt` | **sha256** hashes of the compressed files (`sha256sum -c` compatible) |
+| `manifest.json` | Machine-readable version metadata (entry counts, file sizes, **blake3** + sha256 hashes) |
 
 The manifest is useful for programmatic consumers — check its `version` field (set to the generation date) to detect whether the dataset has been updated.
 
@@ -141,17 +141,24 @@ cargo run --release -- --work-dir ./data --output-dir ./data
   "episodes": [
     {
       "number": 1,
-      "absolute": 1,
       "seasonNumber": 1,
-      "titles": { "english": "Asteroid Blues" },
+      "titles": { "english": "Asteroid Blues", "native": "アステロイド・ブルース", "romaji": "Asuteroido Burūsu" },
       "airDate": { "year": 1998, "month": 4, "day": 3 },
-      "runtime": 24,
+      "runtime": 25,
       "overview": "Spike and Jet chase a bounty...",
-      "ids": { "tvdb": 2337001 }
+      "rating": { "average": 7.38, "count": 57 },
+      "image": "https://image.tmdb.org/t/p/original/....jpg",
+      "ids": { "tmdb": 63066, "anidb": 881 }
     }
   ]
 }
 ```
+
+Episode data comes from **TMDB** (`/tv/{id}/season/{n}`) and is filled in from
+**[ani.zip](https://api.ani.zip)** (AniDB-derived multilingual titles, summaries
+and ratings).  Episodes are sorted by `(seasonNumber, number)`; specials live
+in season 0.  Fields without data are omitted rather than emitted as empty
+strings or nulls.
 
 ### Manga entry
 
@@ -218,8 +225,9 @@ cargo run --release -- --work-dir ./data --output-dir ./data
 This dataset is built from multiple upstream sources. Please respect their terms:
 
 - **[AniList](https://anilist.co)** — Primary source for basic metadata (titles, descriptions, genres, scores, dates). Data retrieved via the [AniList API v2](https://anilist.gitbook.io/anilist-apiv2-docs/).
-- **[TMDB](https://www.themoviedb.org)** — Artwork images (posters, backdrops, logos). This product uses the TMDB API but is not endorsed or certified by TMDB.
-- **[TheTVDB](https://thetvdb.com)** — Episode metadata and additional artwork. Data provided by TheTVDB.com.
+- **[TMDB](https://www.themoviedb.org)** — Artwork images (posters, backdrops, logos) and per-episode metadata (titles, synopses, ratings, stills). This product uses the TMDB API but is not endorsed or certified by TMDB.
+- **[TheTVDB](https://thetvdb.com)** — Additional artwork. Data provided by TheTVDB.com.
+- **[ani.zip](https://api.ani.zip)** — AniDB-derived episode titles (multilingual), summaries and ratings.
 - **[Fribb/anime-lists](https://github.com/Fribb/anime-lists)** — Cross-database ID mappings (MAL, AniDB, Kitsu, etc.).
 
 If you redistribute or build on this dataset, include the appropriate attribution above.

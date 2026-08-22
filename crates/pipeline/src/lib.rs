@@ -3,13 +3,17 @@
 //! This crate owns the multi-phase build process:
 //!
 //! 1. **Enumerate** — fetch all anime and manga entries from AniList
-//! 2. **Cross-reference** — resolve TVDB/TMDB IDs via Fribb/anime-lists
-//! 3. **Enrich (TMDB)** — fetch artwork from TMDB
-//! 4. **Enrich (TVDB)** — fetch episodes and artwork from TheTVDB
-//! 5. **Output** — compress to final JSONL, generate manifest
+//! 2. **Cross-reference** — resolve external IDs via Fribb/anime-lists
+//! 3. **Enrich (TMDB)** — fetch artwork *and per-episode metadata* from TMDB
+//! 4. **Enrich (TVDB)** — fetch additional artwork from TheTVDB
+//! 5. **Enrich (ani.zip)** — fill in multilingual episode titles, AniDB
+//!    summaries/ratings, and add episodes for shows TMDB doesn't know
+//! 6. **Output** — compress to final JSONL, generate checksums + manifest
 //!
-//! Each phase is independently runnable and resumable via the checkpoint system.
+//! Runs are always fresh (CI); checkpoint persistence is disabled and phase
+//! progress is kept in memory only.
 
+pub mod anizip;
 pub mod checkpoint;
 pub mod crossref;
 #[cfg(unix)]

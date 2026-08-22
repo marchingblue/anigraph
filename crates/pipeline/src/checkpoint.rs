@@ -1,9 +1,32 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Global switch for checkpoint **persistence**.
+///
+/// Phase progress is always tracked in memory (the runner uses it for the
+/// end-of-run summary), but writing `anigraph-checkpoint.json` to disk only
+/// matters for local resume workflows.  anigraph runs in CI where every run
+/// starts fresh, so persistence defaults to off and stale files are deleted
+/// at startup — see [`crate::runner::run_pipeline`].
+static CHECKPOINT_PERSISTENCE: AtomicBool = AtomicBool::new(false);
+
+impl Checkpoint {
+    /// Enable or disable writing checkpoint files to disk.
+    pub fn set_persistence(enabled: bool) {
+        CHECKPOINT_PERSISTENCE.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Whether checkpoint files are currently persisted.
+    #[allow(dead_code)]
+    pub fn persistence_enabled() -> bool {
+        CHECKPOINT_PERSISTENCE.load(Ordering::Relaxed)
+    }
+}
 
 /// Identifies a pipeline phase.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -14,6 +37,7 @@ pub enum PhaseId {
     FribbCrossref,
     TvdbEnrich,
     TmdbEnrich,
+    AnizipEnrich,
     Output,
 }
 
@@ -25,6 +49,7 @@ impl std::fmt::Display for PhaseId {
             Self::FribbCrossref => write!(f, "fribb_crossref"),
             Self::TvdbEnrich => write!(f, "tvdb_enrich"),
             Self::TmdbEnrich => write!(f, "tmdb_enrich"),
+            Self::AnizipEnrich => write!(f, "anizip_enrich"),
             Self::Output => write!(f, "output"),
         }
     }
@@ -250,6 +275,11 @@ impl Checkpoint {
 
     /// Save checkpoint atomically.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        // Persistence can be disabled (CI runs are always fresh); the caller's
+        // progress state still lives in memory.
+        if !CHECKPOINT_PERSISTENCE.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(&tmp, json)?;
@@ -473,6 +503,7 @@ mod tests {
         ckpt.complete_page(&PhaseId::AnilistAnime, 50, 5000);
         ckpt.complete_page(&PhaseId::AnilistAnime, 50, 10000);
         ckpt.complete_paginated(&PhaseId::AnilistAnime);
+        Checkpoint::set_persistence(true);
         ckpt.save(&path).unwrap();
 
         let loaded = Checkpoint::load(&path).unwrap();
@@ -526,6 +557,7 @@ mod tests {
             ckpt.complete_page(&PhaseId::AnilistAnime, 50, 0);
         }
         ckpt.set_window_cursor(&PhaseId::AnilistAnime, 1, 5);
+        Checkpoint::set_persistence(true);
         ckpt.save(&path).unwrap();
 
         let loaded = Checkpoint::load(&path).unwrap();
@@ -546,6 +578,7 @@ mod tests {
         // Last page of window [1, 2000): cursor must jump to the next
         // window's first page (2001, 1).
         ckpt.set_window_cursor(&PhaseId::AnilistAnime, 2001, 1);
+        Checkpoint::set_persistence(true);
         ckpt.save(&path).unwrap();
 
         let loaded = Checkpoint::load(&path).unwrap();

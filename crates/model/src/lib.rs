@@ -15,6 +15,6 @@ pub mod manga;
 pub mod shared;
 
 // Re-export the most important types at crate root for convenience.
-pub use anime::{AnimeEntry, Episode, EpisodeIds, EpisodeTitle};
+pub use anime::{AnimeEntry, Episode, EpisodeIds, EpisodeRating, EpisodeTitle};
 pub use manga::MangaEntry;
 pub use shared::*;

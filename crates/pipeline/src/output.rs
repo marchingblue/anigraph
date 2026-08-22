@@ -12,7 +12,15 @@ use crate::phase::{Phase, PipelineConfig};
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 12;
 
-const ANIME_TVDB: &str = "anime-tvdb.jsonl";
+/// Upstream candidates for the anime dataset, most-enriched first.  The
+/// output phase picks the first one that exists so it still works when
+/// enrichment phases were skipped.
+const ANIME_INPUTS: [&str; 4] = [
+    "anime-anizip.jsonl",
+    "anime-tvdb.jsonl",
+    "anime-tmdb.jsonl",
+    "anime-crossref.jsonl",
+];
 const MANGA_BASE: &str = "manga-base.jsonl";
 const ANIME_OUTPUT: &str = "anigraph-anime.jsonl.zst";
 const MANGA_OUTPUT: &str = "anigraph-manga.jsonl.zst";
@@ -101,34 +109,43 @@ impl Phase for OutputPhase {
         let mut total_manga = 0u64;
         let mut files_written = 0u64;
 
-        // ── Anime: anime-tvdb.jsonl → anime.jsonl.zst ──────────────────
+        // ── Anime: most-enriched upstream → anime.jsonl.zst ─────────────
         {
-            let input = config.work_dir.join(ANIME_TVDB);
-            let output = config.output_dir.join(ANIME_OUTPUT);
+            let found = ANIME_INPUTS
+                .iter()
+                .map(|f| config.work_dir.join(f))
+                .find(|p| p.exists());
 
-            if input.exists() {
-                let result = compress_jsonl(&input, &output, "anime")?;
-                let hashes = compute_hashes(&output)?;
-                total_anime = result.line_count;
+            match found {
+                Some(input) => {
+                    let output = config.output_dir.join(ANIME_OUTPUT);
+                    let result = compress_jsonl(&input, &output, "anime")?;
+                    let hashes = compute_hashes(&output)?;
+                    total_anime = result.line_count;
 
-                tracing::info!(
-                    "Anime: {} entries, {} → {} ({:.1}%), blake3={} sha256={}",
-                    result.line_count,
-                    format_size(result.input_size),
-                    format_size(result.output_size),
-                    compression_ratio(result.input_size, result.output_size),
-                    &hashes.blake3[..12],
-                    &hashes.sha256[..12],
-                );
+                    tracing::info!(
+                        "Anime: {} entries, {} → {} ({:.1}%), blake3={} sha256={}",
+                        result.line_count,
+                        format_size(result.input_size),
+                        format_size(result.output_size),
+                        compression_ratio(result.input_size, result.output_size),
+                        &hashes.blake3[..12],
+                        &hashes.sha256[..12],
+                    );
 
-                manifest_entries.push((ANIME_OUTPUT, FileInfo {
-                    size: result.output_size,
-                    blake3: hashes.blake3,
-                    sha256: hashes.sha256,
-                }));
-                files_written += 1;
-            } else {
-                tracing::warn!("Anime input not found at {}, skipping", input.display());
+                    manifest_entries.push((ANIME_OUTPUT, FileInfo {
+                        size: result.output_size,
+                        blake3: hashes.blake3,
+                        sha256: hashes.sha256,
+                    }));
+                    files_written += 1;
+                }
+                None => {
+                    tracing::warn!(
+                        "No anime input found (tried {:?}), skipping",
+                        ANIME_INPUTS
+                    );
+                }
             }
         }
 
@@ -164,12 +181,13 @@ impl Phase for OutputPhase {
         }
 
         // ── Write checksums.txt ─────────────────────────────────────────
+        // Standard `<sha256-hex>  <filename>` format — directly consumable
+        // by `sha256sum -c`.  BLAKE3 digests live in manifest.json.
         let checksums_path = config.output_dir.join(CHECKSUMS_FILE);
         let mut checksums = String::new();
 
         for (filename, info) in &manifest_entries {
-            checksums.push_str(&format!("blake3:{}  {}\n", info.blake3, filename));
-            checksums.push_str(&format!("sha256:{}  {}\n", info.sha256, filename));
+            checksums.push_str(&format!("{}  {}\n", info.sha256, filename));
         }
 
         std::fs::write(&checksums_path, &checksums)
