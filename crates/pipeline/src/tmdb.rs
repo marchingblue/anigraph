@@ -469,31 +469,24 @@ async fn fetch_full_show(
     tv_id: i32,
 ) -> Result<CachedShow> {
     let mut show = CachedShow::default();
-    match fetch_tv(http, api_key, bucket, tv_id).await? {
-        Some(resp) => {
-            show.images = resp.images;
-            match fetch_show_episodes(http, api_key, bucket, tv_id, &resp.seasons).await {
-                Ok(eps) => {
-                    show.episode_total = eps.len();
-                    for ep in eps {
-                        let sn = ep.season_number.unwrap_or(1);
-                        show.episodes_by_season.entry(sn).or_default().push(ep);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("TMDB TV {tv_id}: episode fetch failed: {e:#}");
-                    show.failure_occurred = true;
-                }
-            }
+    if let Some(resp) = fetch_tv(http, api_key, bucket, tv_id).await? {
+        show.images = resp.images;
+        if let Err(e) = fetch_show_episodes(http, api_key, bucket, tv_id, &resp.seasons).await {
+            tracing::warn!("TMDB TV {tv_id}: episode fetch failed: {e:#}");
+            show.failure_occurred = true;
+        } else {
+            show.episode_total = show.episodes_by_season.values().map(Vec::len).sum();
         }
-        None => {} // 404 — stale cross-reference
-    }
+    } // else: 404 — stale cross-reference
     Ok(show)
 }
 
 /// Comparable ordinal for a serialized fuzzy date ({year, month?, day?}).
 /// Range-end dates default to Dec 31, range-start to Jan 1.
-fn fuzzy_ord(v: Option<&Value>, is_end: bool) -> Option<(i32, i32, i32)> {
+/// A resolved calendar position as (year, month, day).
+type DateOrd = (i32, i32, i32);
+
+fn fuzzy_ord(v: Option<&Value>, is_end: bool) -> Option<DateOrd> {
     let v = v?;
     let y = v.get("year")?.as_i64()? as i32;
     let m = v.get("month").and_then(Value::as_i64).map(|m| m as i32)
@@ -503,7 +496,7 @@ fn fuzzy_ord(v: Option<&Value>, is_end: bool) -> Option<(i32, i32, i32)> {
     Some((y, m, d))
 }
 
-fn episode_air_ord(ep: &Episode) -> Option<(i32, i32, i32)> {
+fn episode_air_ord(ep: &Episode) -> Option<DateOrd> {
     ep.air_date
         .as_ref()
         .map(|f| (f.year, f.month.unwrap_or(1), f.day.unwrap_or(1)))
@@ -512,7 +505,7 @@ fn episode_air_ord(ep: &Episode) -> Option<(i32, i32, i32)> {
 /// An entry's [start, end] airing window.  A missing end date means
 /// open-ended (RELEASING / long-runners like One Piece) and extends to the
 /// far future; a missing start extends to the far past.
-fn entry_window(entry: &Value) -> Option<((i32, i32, i32), (i32, i32, i32))> {
+fn entry_window(entry: &Value) -> Option<(DateOrd, DateOrd)> {
     let dates = entry.get("dates")?;
     if dates.get("start").is_none() && dates.get("end").is_none() {
         return None;
@@ -542,7 +535,7 @@ fn attribute_seasons(
         return out;
     }
 
-    let windows: Vec<Option<((i32, i32, i32), (i32, i32, i32))>> =
+    let windows: Vec<Option<(DateOrd, DateOrd)>> =
         entries.iter().map(|(_, e)| entry_window(e)).collect();
 
     // Sole claimant with no air dates at all: hand over the entire show.
@@ -802,15 +795,15 @@ impl Phase for TmdbEnrichPhase {
                 }
             }
 
-            if let Some(eps) = &assigned[i] {
-                if !eps.is_empty() {
-                    eps_attached = eps.len();
-                    match serde_json::to_value(eps) {
-                        Ok(v) => entry["episodes"] = v,
-                        Err(e) => {
-                            tracing::warn!("TMDB: episode serialize failed: {e}");
-                            ser_fail = true;
-                        }
+            if let Some(eps) = &assigned[i]
+                && !eps.is_empty()
+            {
+                eps_attached = eps.len();
+                match serde_json::to_value(eps) {
+                    Ok(v) => entry["episodes"] = v,
+                    Err(e) => {
+                        tracing::warn!("TMDB: episode serialize failed: {e}");
+                        ser_fail = true;
                     }
                 }
             }
