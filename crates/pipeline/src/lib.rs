@@ -4,16 +4,15 @@
 //!
 //! 1. **Enumerate** — fetch all anime and manga entries from AniList
 //! 2. **Cross-reference** — resolve external IDs via Fribb/anime-lists
-//! 3. **Enrich (TMDB)** — fetch artwork *and per-episode metadata* from TMDB
+//! 3. **Enrich (TMDB)** — fetch artwork *and per-episode metadata* from TMDB,
+//!    attributing each TMDB season to the correct sibling AniList entry when
+//!    several entries share one show id
 //! 4. **Enrich (TVDB)** — fetch additional artwork from TheTVDB
-//! 5. **Enrich (ani.zip)** — fill in multilingual episode titles, AniDB
-//!    summaries/ratings, and add episodes for shows TMDB doesn't know
-//! 6. **Output** — compress to final JSONL, generate checksums + manifest
+//! 5. **Output** — compress to final JSONL, generate checksums + manifest
 //!
 //! Runs are always fresh (CI); checkpoint persistence is disabled and phase
 //! progress is kept in memory only.
 
-pub mod anizip;
 pub mod checkpoint;
 pub mod crossref;
 #[cfg(unix)]

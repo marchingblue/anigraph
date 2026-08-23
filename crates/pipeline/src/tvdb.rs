@@ -442,9 +442,8 @@ fn merge_artwork(entry: &mut Value, new_artworks: Vec<Artwork>) {
 
 /// TVDB enrichment phase: fetch additional artwork from TheTVDB.
 ///
-/// Episodes are no longer sourced from TVDB (its list endpoints return null
-/// titles/overviews since the v4 API change); see [`crate::tmdb`] and
-/// [`crate::anizip`].  Uses ordered-buffered concurrency (same pattern as
+/// Episodes are not sourced from TVDB at all (its list endpoints return null
+/// titles/overviews since the v4 API change); see [`crate::tmdb`].  Uses ordered-buffered concurrency (same pattern as
 /// [`TmdbEnrichPhase`]): up to [`TVDB_CONCURRENCY`] entries are in-flight
 /// simultaneously, each fetching artwork through the shared rate limiter.
 /// The token is cached behind an `Arc<Mutex<>>` so only one worker ever

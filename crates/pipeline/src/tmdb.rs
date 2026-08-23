@@ -448,139 +448,137 @@ fn map_tmdb_episodes(season_number: i32, dtos: &[TmdbEpisodeDto]) -> Vec<Episode
         .collect()
 }
 
-// ── Enrichment function ────────────────────────────────────────────────────
+// ── Show caching + season attribution ────────────────────────────────────
 
-/// Per-entry TMDB enrichment result.
-struct EnrichResult {
-    entry: Value,
-    /// Did we find any TMDB artwork to add?
-    artwork_added: bool,
-    /// Per-type artwork counts (after capping).
-    poster_count: usize,
-    backdrop_count: usize,
-    logo_count: usize,
-    /// Episodes fetched from TMDB season endpoints.
-    episode_count: usize,
-    /// Did any API call fail (network, 5xx) after exhausting retries?
+/// Per-show data cached across sibling AniList entries that share one TMDB
+/// show id (franchises such as *Initial D* or *Naruto*).
+#[derive(Default)]
+struct CachedShow {
+    images: TmdbImages,
+    /// Season number → that season's episodes (sorted).
+    episodes_by_season: std::collections::BTreeMap<i32, Vec<Episode>>,
+    episode_total: usize,
     failure_occurred: bool,
 }
 
-/// Fetch TMDB data for a single entry and merge it in.
-///
-/// If the entry has no TMDB IDs, or if all API calls fail, the entry is
-/// returned **unchanged** (pass-through).  The caller writes every entry.
-async fn enrich_entry(
+/// Fetch a show's artwork and its complete multi-season episode list once.
+async fn fetch_full_show(
     http: &reqwest::Client,
     api_key: &str,
     bucket: &Mutex<TokenBucket>,
-    mut entry: Value,
-) -> EnrichResult {
-    let anilist_id = entry["id"].as_i64().unwrap_or(0) as i32;
-    let ids = &entry["ids"];
-
-    let tmdb_tv = ids["tmdbTv"].as_i64().map(|v| v as i32);
-    let tmdb_movies: Vec<i32> = ids["tmdbMovie"]
-        .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_i64().map(|v| v as i32)).collect())
-        .unwrap_or_default();
-
-    if tmdb_tv.is_none() && tmdb_movies.is_empty() {
-        return EnrichResult {
-            entry,
-            artwork_added: false,
-            poster_count: 0,
-            backdrop_count: 0,
-            logo_count: 0,
-            episode_count: 0,
-            failure_occurred: false,
-        };
-    }
-
-    let mut failure_occurred = false;
-    let mut poster_count = 0usize;
-    let mut backdrop_count = 0usize;
-    let mut logo_count = 0usize;
-    let mut episode_count = 0usize;
-
-    // Fetch TV series artwork + episodes
-    if let Some(tv_id) = tmdb_tv {
-        match fetch_tv(http, api_key, bucket, tv_id).await {
-            Ok(Some(resp)) => {
-                let (artworks, pc, bc, lc) = tmdb_images_to_artwork(&resp.images);
-                poster_count += pc;
-                backdrop_count += bc;
-                logo_count += lc;
-                if !artworks.is_empty() {
-                    merge_artwork(&mut entry, artworks);
+    tv_id: i32,
+) -> Result<CachedShow> {
+    let mut show = CachedShow::default();
+    match fetch_tv(http, api_key, bucket, tv_id).await? {
+        Some(resp) => {
+            show.images = resp.images;
+            match fetch_show_episodes(http, api_key, bucket, tv_id, &resp.seasons).await {
+                Ok(eps) => {
+                    show.episode_total = eps.len();
+                    for ep in eps {
+                        let sn = ep.season_number.unwrap_or(1);
+                        show.episodes_by_season.entry(sn).or_default().push(ep);
+                    }
                 }
-                // ── Episodes ────────────────────────────────────────────
-                match fetch_show_episodes(http, api_key, bucket, tv_id, &resp.seasons).await {
-                    Ok(eps) if !eps.is_empty() => {
-                        episode_count = eps.len();
-                        match serde_json::to_value(&eps) {
-                            Ok(v) => entry["episodes"] = v,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "TMDB: entry {anilist_id} (TV {tv_id}) episode serialize failed: {e}"
-                                );
-                                failure_occurred = true;
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(
-                            "TMDB: entry {anilist_id} (TV {tv_id}) episode fetch failed: {e:#}"
-                        );
-                        failure_occurred = true;
-                    }
+                Err(e) => {
+                    tracing::warn!("TMDB TV {tv_id}: episode fetch failed: {e:#}");
+                    show.failure_occurred = true;
                 }
             }
-            Ok(None) => { /* 404 — stale cross-ref */ }
-            Err(e) => {
-                tracing::warn!("TMDB: entry {anilist_id} (TV {tv_id}) fetch failed: {e:#}");
-                failure_occurred = true;
+        }
+        None => {} // 404 — stale cross-reference
+    }
+    Ok(show)
+}
+
+/// Comparable ordinal for a serialized fuzzy date ({year, month?, day?}).
+/// Range-end dates default to Dec 31, range-start to Jan 1.
+fn fuzzy_ord(v: Option<&Value>, is_end: bool) -> Option<(i32, i32, i32)> {
+    let v = v?;
+    let y = v.get("year")?.as_i64()? as i32;
+    let m = v.get("month").and_then(Value::as_i64).map(|m| m as i32)
+        .unwrap_or(if is_end { 12 } else { 1 });
+    let d = v.get("day").and_then(Value::as_i64).map(|d| d as i32)
+        .unwrap_or(if is_end { 31 } else { 1 });
+    Some((y, m, d))
+}
+
+fn episode_air_ord(ep: &Episode) -> Option<(i32, i32, i32)> {
+    ep.air_date
+        .as_ref()
+        .map(|f| (f.year, f.month.unwrap_or(1), f.day.unwrap_or(1)))
+}
+
+/// An entry's [start, end] airing window.  A missing end date means
+/// open-ended (RELEASING / long-runners like One Piece) and extends to the
+/// far future; a missing start extends to the far past.
+fn entry_window(entry: &Value) -> Option<((i32, i32, i32), (i32, i32, i32))> {
+    let dates = entry.get("dates")?;
+    if dates.get("start").is_none() && dates.get("end").is_none() {
+        return None;
+    }
+    let s = fuzzy_ord(dates.get("start"), false).unwrap_or((0, 1, 1));
+    let e = fuzzy_ord(dates.get("end"), true).unwrap_or((9999, 12, 31));
+    Some((s.min(e), s.max(e)))
+}
+
+/// Attribute TMDB seasons to sibling AniList entries sharing one show id.
+///
+/// A season is claimed by every entry whose airing window contains ≥40% of
+/// the season's dated episodes — split-cour siblings share a season while
+/// unrelated franchise entries stay out.  Entries without air dates only win
+/// when they are the show's sole non-movie claimant; MOVIE-format entries
+/// never claim TV seasons.
+fn attribute_seasons(
+    seasons: &std::collections::BTreeMap<i32, Vec<Episode>>,
+    entries: &[(usize, &Value)],
+) -> Vec<Option<Vec<Episode>>> {
+    let mut out: Vec<Option<Vec<Episode>>> = vec![None; entries.len()];
+
+    let eligible: Vec<usize> = (0..entries.len())
+        .filter(|&i| entries[i].1.get("format").and_then(Value::as_str) != Some("MOVIE"))
+        .collect();
+    if eligible.is_empty() {
+        return out;
+    }
+
+    let windows: Vec<Option<((i32, i32, i32), (i32, i32, i32))>> =
+        entries.iter().map(|(_, e)| entry_window(e)).collect();
+
+    // Sole claimant with no air dates at all: hand over the entire show.
+    // (With dates, the general ≥40% window rule below applies so a lone
+    // entry mapped to a multi-season franchise show doesn't inherit every
+    // season — e.g. AoT S1 mapped to the show containing S1–S4.)
+    if eligible.len() == 1 && windows[eligible[0]].is_none() {
+        let all: Vec<Episode> = seasons.values().flatten().cloned().collect();
+        if !all.is_empty() {
+            out[eligible[0]] = Some(all);
+        }
+        return out;
+    }
+
+    for eps in seasons.values() {
+        let dated = eps.iter().filter(|e| e.air_date.is_some()).count();
+        if dated == 0 {
+            continue; // cannot place a fully undated season among siblings
+        }
+        let threshold = ((dated * 2) / 5).max(1); // ≥40% of dated episodes
+        for &ei in &eligible {
+            let Some((w0, w1)) = windows[ei] else { continue };
+            let inside = eps
+                .iter()
+                .filter(|e| matches!(episode_air_ord(e), Some(d) if d >= w0 && d <= w1))
+                .count();
+            if inside >= threshold {
+                out[ei].get_or_insert_with(Vec::new).extend(eps.iter().cloned());
             }
         }
     }
 
-    // Fetch movie artwork (may have multiple movie IDs)
-    for &movie_id in &tmdb_movies {
-        match fetch_movie(http, api_key, bucket, movie_id).await {
-            Ok(Some(resp)) => {
-                let (artworks, pc, bc, lc) = tmdb_images_to_artwork(&resp.images);
-                poster_count += pc;
-                backdrop_count += bc;
-                logo_count += lc;
-                if !artworks.is_empty() {
-                    merge_artwork(&mut entry, artworks);
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!("TMDB: entry {anilist_id} (movie {movie_id}) fetch failed: {e:#}");
-                failure_occurred = true;
-            }
-        }
+    for v in out.iter_mut().flatten() {
+        v.sort_by_key(|e| (e.season_number.unwrap_or(1), e.number));
     }
-
-    let artwork_added = poster_count + backdrop_count + logo_count > 0;
-
-    if (artwork_added || episode_count > 0)
-        && let Some(sources) = entry["sources"].as_array_mut()
-            && !sources.iter().any(|s| s == "tmdb") {
-                sources.push(Value::String("tmdb".to_string()));
-            }
-
-    EnrichResult {
-        entry,
-        artwork_added,
-        poster_count,
-        backdrop_count,
-        logo_count,
-        episode_count,
-        failure_occurred,
-    }
+    out
 }
 
 /// Append `new_artworks` to the entry's existing `artwork` array.
@@ -616,137 +614,253 @@ impl Phase for TmdbEnrichPhase {
             anyhow::bail!("input not found at {}", input_path.display());
         }
 
-        // ── Determine start state ───────────────────────────────────────
         let total_input = count_jsonl_lines(&input_path)?;
-        let start_from = if config.resume {
-            if checkpoint.is_completed(&phase_id) {
-                tracing::info!("TMDB enrichment already completed, skipping");
-                let total = match checkpoint.phases.get(&phase_id) {
-                    Some(crate::checkpoint::PhaseState::Simple(s)) => s.completed,
-                    _ => checkpoint.items_written(&phase_id),
-                };
-                return Ok(total);
-            }
-            if output_path.exists() { count_jsonl_lines(&output_path)? } else { 0 }
-        } else {
-            checkpoint.phases.insert(
-                phase_id.clone(),
-                crate::checkpoint::PhaseState::Simple(
-                    crate::checkpoint::SimpleState::new(total_input),
-                ),
-            );
-            0
-        };
+        checkpoint.phases.insert(
+            phase_id.clone(),
+            crate::checkpoint::PhaseState::Simple(
+                crate::checkpoint::SimpleState::new(total_input),
+            ),
+        );
 
-        // ── Read entries ────────────────────────────────────────────────
-        let reader = std::fs::File::open(&input_path)?;
-        let buf = std::io::BufReader::new(reader);
-        let lines: Vec<String> = std::io::BufRead::lines(buf)
+        let start = Instant::now();
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .context("building HTTP client")?;
+        let bucket = Arc::new(Mutex::new(TokenBucket::new(TMDB_RATE_LIMIT)));
+        let api_key = Arc::new(api_key.clone());
+
+        // ── Parse input ─────────────────────────────────────────────────
+        let reader = std::fs::File::open(&input_path)
+            .with_context(|| format!("opening {} for reading", input_path.display()))?;
+        let raw_lines: Vec<String> = std::io::BufRead::lines(std::io::BufReader::new(reader))
             .map_while(|l| l.ok())
-            .skip(start_from as usize)
             .collect();
-        let batch_size = lines.len() as u64;
 
-        if batch_size == 0 {
-            if start_from > 0 {
-                if let crate::checkpoint::PhaseState::Simple(s) =
-                    checkpoint.phases.get_mut(&phase_id).unwrap() { s.completed = start_from; }
-                checkpoint.complete_simple(&phase_id);
-                checkpoint.save(&config.checkpoint_path)?;
+        let mut entries: Vec<Value> = Vec::with_capacity(raw_lines.len());
+        let mut malformed = 0u64;
+        for line in &raw_lines {
+            match serde_json::from_str::<Value>(line) {
+                Ok(v) => entries.push(v),
+                Err(e) => {
+                    malformed += 1;
+                    tracing::warn!("TMDB: malformed JSON line dropped: {e}");
+                }
             }
-            return Ok(0);
         }
 
-        tracing::info!("TMDB: processing {batch_size} entries (from line {start_from})");
-
-        // Wall-clock start, used for the ETA in the progress indicator.
-        let start = Instant::now();
-
-        // ── Shared state ───────────────────────────────────────────────
-        let http = reqwest::Client::new();
-        let bucket = Arc::new(Mutex::new(TokenBucket::new(TMDB_RATE_LIMIT)));
-        let api_key = api_key.clone();
-
-        // ── Ordered buffered processing ─────────────────────────────────
-        // Each stream item returns: (out_line, idx, has_tv_id, has_movie_ids, artwork_added,
-        // poster, backdrop, logo, failure_occurred, episode_count)
-        let stream = futures::stream::iter(lines.into_iter().enumerate().map(
-            |(offset, line)| {
-                let http = http.clone();
-                let bucket = Arc::clone(&bucket);
-                let api_key = api_key.clone();
-
-                async move {
-                    let idx = start_from + offset as u64;
-
-                    let entry: Value = match serde_json::from_str(&line) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!("TMDB: malformed JSON at line {idx}: {e}");
-                            return (line, idx, false, false, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
-                        }
-                    };
-
-                    let has_tv_id = entry["ids"]["tmdbTv"].is_number();
-                    let has_movie_ids = entry["ids"]["tmdbMovie"]
-                        .as_array().is_some_and(|a| !a.is_empty());
-
-                    let result = enrich_entry(&http, &api_key, &bucket, entry).await;
-                    let out_line = serde_json::to_string(&result.entry)
-                        .unwrap_or_else(|_| line.clone());
-
-                    let artwork_added = if result.artwork_added { 1u64 } else { 0u64 };
-                    let failure = if result.failure_occurred { 1u64 } else { 0u64 };
-
-                    (out_line, idx, has_tv_id, has_movie_ids,
-                     result.poster_count as u64, result.backdrop_count as u64, result.logo_count as u64,
-                     failure, artwork_added, result.episode_count as u64)
+        // ── Group sibling entries by shared TMDB show id ────────────────
+        let mut groups: std::collections::HashMap<i32, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut movie_refs: Vec<(usize, i32)> = Vec::new(); // (entry idx, movie id)
+        for (i, e) in entries.iter().enumerate() {
+            if let Some(tv) = e["ids"]["tmdbTv"].as_i64() {
+                groups.entry(tv as i32).or_default().push(i);
+            }
+            if let Some(ms) = e["ids"]["tmdbMovie"].as_array() {
+                for m in ms {
+                    if let Some(mid) = m.as_i64() {
+                        movie_refs.push((i, mid as i32));
+                    }
                 }
-            },
-        ))
-        .buffered(TMDB_CONCURRENCY);
+            }
+        }
+        let show_ids: Vec<i32> = groups.keys().copied().collect();
+        tracing::info!(
+            "TMDB: {} entries → {} unique shows, {} movie-id refs",
+            entries.len(),
+            show_ids.len(),
+            movie_refs.len()
+        );
 
-        // ── Write results ──────────────────────────────────────────────
-        let mut writer = if start_from > 0 {
-            JsonlWriter::append(&output_path)?
-        } else {
-            JsonlWriter::new(&output_path)?
+        // ── Fetch each unique show once: images + all-season episodes ───
+        let mut shows: std::collections::HashMap<i32, CachedShow> =
+            std::collections::HashMap::new();
+        let mut show_failures = 0u64;
+
+        let fetch_futs = show_ids.iter().copied().map(|tid| {
+            let http = http.clone();
+            let bucket = Arc::clone(&bucket);
+            let key = Arc::clone(&api_key);
+            async move { (tid, fetch_full_show(&http, &key, &bucket, tid).await) }
+        });
+        let fetched = futures::StreamExt::buffered(
+            futures::stream::iter(fetch_futs),
+            TMDB_CONCURRENCY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        for (tid, res) in fetched {
+            match res {
+                Ok(show) => {
+                    if show.failure_occurred {
+                        show_failures += 1;
+                    }
+                    shows.insert(tid, show);
+                }
+                Err(e) => {
+                    show_failures += 1;
+                    tracing::warn!("TMDB: show {tid} failed: {e:#}");
+                }
+            }
+        }
+
+        // ── Attribute seasons within each sibling group ─────────────────
+        let mut assigned: Vec<Option<Vec<Episode>>> = vec![None; entries.len()];
+        for (&tv_id, recs) in &groups {
+            let Some(show) = shows.get(&tv_id) else { continue };
+            let refs: Vec<(usize, &Value)> =
+                recs.iter().map(|&ri| (ri, &entries[ri])).collect();
+            let got = attribute_seasons(&show.episodes_by_season, &refs);
+            for (k, &ri) in recs.iter().enumerate() {
+                assigned[ri] = got[k].clone();
+            }
+        }
+
+        // ── Prefetch unique movie images ────────────────────────────────
+        let unique_movies: Vec<i32> = {
+            let mut m: Vec<i32> = movie_refs.iter().map(|(_, id)| *id).collect();
+            m.sort_unstable();
+            m.dedup();
+            m
         };
+        let mut movie_images: std::collections::HashMap<i32, TmdbImages> =
+            std::collections::HashMap::new();
+        let movie_futs = unique_movies.iter().copied().map(|mid| {
+            let http = http.clone();
+            let bucket = Arc::clone(&bucket);
+            let key = Arc::clone(&api_key);
+            async move { (mid, fetch_movie(&http, &key, &bucket, mid).await) }
+        });
+        let movie_results = futures::StreamExt::buffered(
+            futures::stream::iter(movie_futs),
+            TMDB_CONCURRENCY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let mut movie_image_failures = 0u64;
+        for (mid, res) in movie_results {
+            match res {
+                Ok(Some(resp)) => {
+                    movie_images.insert(mid, resp.images);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    movie_image_failures += 1;
+                    tracing::warn!("TMDB: movie {mid} images failed: {e:#}");
+                }
+            }
+        }
 
+        // ── Apply enrichment and write results in original order ────────
+        let mut writer = JsonlWriter::new(&output_path)?;
         let mut stats = TmdbPhaseStats::default();
-        let mut processed = 0u64;
         let mut total_episodes = 0u64;
         let mut entries_with_episodes = 0u64;
+        let mut processed = 0u64;
 
-        tokio::pin!(stream);
-        while let Some((out_line, idx, has_tv, has_movie, posters, backdrops, logos, failure, added, eps)) = stream.next().await {
-            writer.write_raw(&out_line).context(format!("writing line {idx}"))?;
-            processed += 1;
+        for (i, entry) in entries.iter_mut().enumerate() {
+            let tv_id = entry["ids"]["tmdbTv"].as_i64().map(|v| v as i32);
+            let has_movie_ids = entry["ids"]["tmdbMovie"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty());
+
+            let mut artwork_added = false;
+            let mut pc = 0usize;
+            let mut bc = 0usize;
+            let mut lc = 0usize;
+            let mut ser_fail = false;
+            let mut eps_attached = 0usize;
+
+            if let Some(t) = tv_id
+                && let Some(show) = shows.get(&t)
+            {
+                let (arts, p, b, l) = tmdb_images_to_artwork(&show.images);
+                pc = p;
+                bc = b;
+                lc = l;
+                if !arts.is_empty() {
+                    merge_artwork(entry, arts);
+                    artwork_added = true;
+                }
+            }
+
+            let movie_ids: Vec<i32> = entry["ids"]["tmdbMovie"]
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_i64).map(|v| v as i32).collect())
+                .unwrap_or_default();
+            for mid in movie_ids {
+                if let Some(images) = movie_images.get(&mid) {
+                    let (arts, p, b, l) = tmdb_images_to_artwork(images);
+                    pc += p;
+                    bc += b;
+                    lc += l;
+                    if !arts.is_empty() {
+                        merge_artwork(entry, arts);
+                        artwork_added = true;
+                    }
+                }
+            }
+
+            if let Some(eps) = &assigned[i] {
+                if !eps.is_empty() {
+                    eps_attached = eps.len();
+                    match serde_json::to_value(eps) {
+                        Ok(v) => entry["episodes"] = v,
+                        Err(e) => {
+                            tracing::warn!("TMDB: episode serialize failed: {e}");
+                            ser_fail = true;
+                        }
+                    }
+                }
+            }
+
+            if (artwork_added || eps_attached > 0)
+                && let Some(sources) = entry["sources"].as_array_mut()
+                && !sources.iter().any(|s| s == "tmdb")
+            {
+                sources.push(Value::String("tmdb".to_string()));
+            }
 
             stats.total_input += 1;
-            if has_tv { stats.with_tv_ids += 1; }
-            if has_movie { stats.with_movie_ids += 1; }
-            if added > 0 { stats.artwork_found += 1; } else if has_tv || has_movie { stats.no_artwork += 1; }
-            stats.total_poster_count += posters;
-            stats.total_backdrop_count += backdrops;
-            stats.total_logo_count += logos;
-            stats.failures += failure;
-            total_episodes += eps;
-            if eps > 0 { entries_with_episodes += 1; }
+            if tv_id.is_some() {
+                stats.with_tv_ids += 1;
+            }
+            if has_movie_ids {
+                stats.with_movie_ids += 1;
+            }
+            if artwork_added {
+                stats.artwork_found += 1;
+            } else if tv_id.is_some() || has_movie_ids {
+                stats.no_artwork += 1;
+            }
+            stats.total_poster_count += pc as u64;
+            stats.total_backdrop_count += bc as u64;
+            stats.total_logo_count += lc as u64;
+            if ser_fail {
+                stats.failures += 1;
+            }
+            total_episodes += eps_attached as u64;
+            if eps_attached > 0 {
+                entries_with_episodes += 1;
+            }
 
-            // Periodically report progress + stats
+            writer.write(entry).context("writing enriched entry")?;
+            processed += 1;
+
             if processed.is_multiple_of(1000) {
-                let written = start_from + processed;
                 if let crate::checkpoint::PhaseState::Simple(s) =
-                    checkpoint.phases.get_mut(&phase_id).unwrap() { s.completed = written; }
+                    checkpoint.phases.get_mut(&phase_id).unwrap()
+                {
+                    s.completed = processed;
+                }
                 crate::progress::log_progress(
                     "TMDB",
-                    written,
-                    stats.total_input,
+                    processed,
+                    total_input,
                     Some(start),
                     &[
-                        ("TV", stats.with_tv_ids),
-                        ("movie", stats.with_movie_ids),
+                        ("shows", show_ids.len() as u64),
                         ("artwork", stats.artwork_found),
                         ("episodes", total_episodes),
                         ("failures", stats.failures),
@@ -756,29 +870,38 @@ impl Phase for TmdbEnrichPhase {
         }
 
         writer.flush()?;
-        let total_written = start_from + processed;
+        stats.failures += show_failures + movie_image_failures;
 
         tracing::info!(
-            "TMDB complete: {} input, {} written.  TV IDs: {}, Movie IDs: {}, artwork found: {}, \
-             total images: {}p+{}b+{}l, episodes: {} across {} shows, failures: {}",
-            stats.total_input, total_written,
-            stats.with_tv_ids, stats.with_movie_ids, stats.artwork_found,
-            stats.total_poster_count, stats.total_backdrop_count, stats.total_logo_count,
-            total_episodes, entries_with_episodes,
+            "TMDB complete: {} input, {} written ({} malformed dropped).  Shows: {}, TV IDs: {}, Movie IDs: {}, \
+             artwork found: {}, images: {}p+{}b+{}l, episodes: {} across {} shows, failures: {} ({})",
+            total_input,
+            processed,
+            malformed,
+            show_ids.len(),
+            stats.with_tv_ids,
+            stats.with_movie_ids,
+            stats.artwork_found,
+            stats.total_poster_count,
+            stats.total_backdrop_count,
+            stats.total_logo_count,
+            total_episodes,
+            entries_with_episodes,
             stats.failures,
+            show_failures + movie_image_failures,
         );
 
         if let crate::checkpoint::PhaseState::Simple(s) =
-            checkpoint.phases.get_mut(&phase_id).unwrap() { s.completed = total_written; }
+            checkpoint.phases.get_mut(&phase_id).unwrap()
+        {
+            s.completed = processed;
+        }
         checkpoint.complete_simple(&phase_id);
-        checkpoint.save(&config.checkpoint_path)
-            .context("saving final checkpoint")?;
+        checkpoint.save(&config.checkpoint_path).context("saving checkpoint")?;
 
-        Ok(total_written)
+        Ok(processed)
     }
 }
-
-// ── Helpers ────────────────────────────────────────────────────────────────
 
 fn count_jsonl_lines(path: &std::path::Path) -> Result<u64> {
     let reader = std::fs::File::open(path)?;
@@ -937,6 +1060,115 @@ mod tests {
     }
 
     // ── Phase identity ─────────────────────────────────────────────────
+
+    // ── Season attribution ────────────────────────────────────────────
+
+    fn dep(season: i32, number: i32, y: i32, m: i32, d: i32) -> Episode {
+        Episode {
+            number,
+            season_number: Some(season),
+            air_date: Some(FuzzyDate { year: y, month: Some(m), day: Some(d) }),
+            ..Default::default()
+        }
+    }
+
+    fn entry_val(format: &str, dates: Value) -> Value {
+        serde_json::json!({ "format": format, "dates": dates })
+    }
+
+    fn counts(res: &[Option<Vec<Episode>>]) -> Vec<usize> {
+        res.iter().map(|o| o.as_ref().map_or(0, |v| v.len())).collect()
+    }
+
+    #[test]
+    fn test_attribution_sole_undated_entry_gets_everything() {
+        let mut seasons = std::collections::BTreeMap::new();
+        seasons.insert(0, vec![dep(0, 1, 2010, 1, 1), dep(0, 2, 2010, 2, 1)]);
+        seasons.insert(1, vec![dep(1, 1, 2010, 4, 1), dep(1, 2, 2010, 4, 8), dep(1, 3, 2010, 4, 15)]);
+        let e0 = entry_val("TV", serde_json::json!({}));
+        let entries = vec![(0usize, &e0)];
+        let res = attribute_seasons(&seasons, &entries);
+        assert_eq!(counts(&res), vec![5]);
+    }
+
+    #[test]
+    fn test_attribution_open_ended_long_runner_claims_all() {
+        let mut seasons = std::collections::BTreeMap::new();
+        seasons.insert(1, vec![dep(1, 1, 1999, 11, 1)]);
+        seasons.insert(9, vec![dep(9, 1, 2024, 6, 1)]); // far-future season arc
+        let e0 = entry_val("TV", serde_json::json!({
+            "start": {"year": 1999, "month": 10}
+        }));
+        let entries = vec![(0usize, &e0)];
+        let res = attribute_seasons(&seasons, &entries);
+        assert_eq!(counts(&res), vec![2], "open-ended end must claim future seasons");
+    }
+
+    #[test]
+    fn test_attribution_disjoint_siblings_slice_their_own_seasons() {
+        let mut seasons = std::collections::BTreeMap::new();
+        seasons.insert(1, vec![dep(1, 1, 2019, 1, 5), dep(1, 2, 2019, 2, 5)]);
+        seasons.insert(2, vec![dep(2, 1, 2020, 1, 5), dep(2, 2, 2020, 2, 5)]);
+        let e0 = entry_val("TV", serde_json::json!({
+            "start": {"year": 2019, "month": 1}, "end": {"year": 2019, "month": 6}}));
+        let e1 = entry_val("TV", serde_json::json!({
+            "start": {"year": 2020, "month": 1}, "end": {"year": 2020, "month": 6}}));
+        let entries = vec![(0usize, &e0), (1usize, &e1)];
+        let res = attribute_seasons(&seasons, &entries);
+        assert_eq!(counts(&res), vec![2, 2]);
+        assert_eq!(res[0].as_ref().unwrap()[0].season_number, Some(1));
+        assert_eq!(res[1].as_ref().unwrap()[0].season_number, Some(2));
+    }
+
+    #[test]
+    fn test_attribution_movies_never_claim_seasons() {
+        let mut seasons = std::collections::BTreeMap::new();
+        seasons.insert(1, vec![dep(1, 1, 2019, 1, 5)]);
+        let e0 = entry_val("MOVIE", serde_json::json!({}));
+        let entries = vec![(0usize, &e0)];
+        let res = attribute_seasons(&seasons, &entries);
+        assert_eq!(counts(&res), vec![0]);
+    }
+
+    #[test]
+    fn test_attribution_undated_multi_group_yields_nothing() {
+        let mut seasons = std::collections::BTreeMap::new();
+        seasons.insert(1, vec![dep(1, 1, 2019, 1, 5)]);
+        let e0 = entry_val("TV", serde_json::json!({}));
+        let e1 = entry_val("TV", serde_json::json!({}));
+        let entries = vec![(0usize, &e0), (1usize, &e1)];
+        let res = attribute_seasons(&seasons, &entries);
+        assert_eq!(counts(&res), vec![0, 0]);
+    }
+
+    #[test]
+    fn test_attribution_split_cour_siblings_share_a_season() {
+        let mut seasons = std::collections::BTreeMap::new();
+        seasons.insert(1, vec![
+            dep(1, 1, 2021, 1, 10), dep(1, 2, 2021, 2, 10),
+            dep(1, 3, 2021, 3, 10), dep(1, 4, 2021, 4, 10),
+        ]);
+        let e0 = entry_val("TV", serde_json::json!({
+            "start": {"year": 2021, "month": 1}, "end": {"year": 2021, "month": 2}}));
+        let e1 = entry_val("TV", serde_json::json!({
+            "start": {"year": 2021, "month": 3}, "end": {"year": 2021, "month": 4}}));
+        let entries = vec![(0usize, &e0), (1usize, &e1)];
+        let res = attribute_seasons(&seasons, &entries);
+        assert_eq!(counts(&res), vec![4, 4], "split-cour siblings share the season");
+    }
+
+    #[test]
+    fn test_attribution_unrelated_window_claims_nothing() {
+        let mut seasons = std::collections::BTreeMap::new();
+        seasons.insert(1, vec![dep(1, 1, 2019, 1, 5), dep(1, 2, 2019, 2, 5)]);
+        let e0 = entry_val("TV", serde_json::json!({
+            "start": {"year": 2019, "month": 1}, "end": {"year": 2019, "month": 6}}));
+        let e1 = entry_val("OVA", serde_json::json!({
+            "start": {"year": 2030, "month": 1}, "end": {"year": 2030, "month": 6}}));
+        let entries = vec![(0usize, &e0), (1usize, &e1)];
+        let res = attribute_seasons(&seasons, &entries);
+        assert_eq!(counts(&res), vec![2, 0]);
+    }
 
     #[test]
     fn test_tmdb_tv_response_parses_snake_case_seasons() {

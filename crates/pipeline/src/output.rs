@@ -15,8 +15,7 @@ const ZSTD_COMPRESSION_LEVEL: i32 = 12;
 /// Upstream candidates for the anime dataset, most-enriched first.  The
 /// output phase picks the first one that exists so it still works when
 /// enrichment phases were skipped.
-const ANIME_INPUTS: [&str; 4] = [
-    "anime-anizip.jsonl",
+const ANIME_INPUTS: [&str; 3] = [
     "anime-tvdb.jsonl",
     "anime-tmdb.jsonl",
     "anime-crossref.jsonl",

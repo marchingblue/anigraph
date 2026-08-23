@@ -37,7 +37,6 @@ pub enum PhaseId {
     FribbCrossref,
     TvdbEnrich,
     TmdbEnrich,
-    AnizipEnrich,
     Output,
 }
 
@@ -49,7 +48,6 @@ impl std::fmt::Display for PhaseId {
             Self::FribbCrossref => write!(f, "fribb_crossref"),
             Self::TvdbEnrich => write!(f, "tvdb_enrich"),
             Self::TmdbEnrich => write!(f, "tmdb_enrich"),
-            Self::AnizipEnrich => write!(f, "anizip_enrich"),
             Self::Output => write!(f, "output"),
         }
     }

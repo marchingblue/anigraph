@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 
-use crate::anizip::AnizipEnrichPhase;
 use crate::checkpoint::{Checkpoint, PhaseId};
 use crate::crossref::CrossRefPhase;
 use crate::enumerate::{EnumeratePhase, MediaType};
@@ -9,7 +8,7 @@ use crate::phase::{Phase, PipelineConfig};
 use crate::tmdb::TmdbEnrichPhase;
 use crate::tvdb::TvdbEnrichPhase;
 
-/// Run the full pipeline: enumerate → cross-ref → TMDB → TVDB → ani.zip.
+/// Run the full pipeline: enumerate → cross-ref → TMDB → TVDB.
 ///
 /// Each phase runs to completion (or is skipped if already completed).
 /// CI always runs fresh: checkpoint persistence is disabled and any stale
@@ -115,10 +114,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<()> {
         tracing::info!("TVDB_API_KEY not set — skipping TVDB enrichment");
     }
 
-    // ── Phase 6: ani.zip enrichment (episodes fill-in + AniDB coverage) ──
-    run_phase(&AnizipEnrichPhase, config, &mut checkpoint).await?;
-
-    // ── Phase 7: Output (compress + checksum) ─────────────────────────
+    // ── Phase 6: Output (compress + checksum) ─────────────────────────
     run_phase(&OutputPhase, config, &mut checkpoint).await?;
 
     // ── Final summary ─────────────────────────────────────────────────
