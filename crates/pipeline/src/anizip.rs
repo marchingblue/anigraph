@@ -83,8 +83,10 @@ impl TokenBucket {
 
 #[derive(Debug, Default, Deserialize)]
 struct AnizipResponse {
+    /// Values are `Option` because ani.zip occasionally emits `"S3": null`
+    /// style records; those are skipped instead of failing the whole entry.
     #[serde(default)]
-    episodes: std::collections::BTreeMap<String, AnizipEpisode>,
+    episodes: std::collections::BTreeMap<String, Option<AnizipEpisode>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -96,8 +98,12 @@ struct AnizipEpisode {
     episode_number: Option<i32>,
     #[serde(default)]
     absolute_episode_number: Option<i32>,
+    /// Multilingual titles.  ani.zip occasionally emits `"en": null` inside
+    /// this map, so values must be `Option` — a plain `String` here made the
+    /// whole entry fail to deserialize (2,744 shows lost their enrichment in
+    /// the 2026-34-fix1 run because of this).
     #[serde(default)]
-    title: Option<std::collections::HashMap<String, String>>,
+    title: Option<std::collections::HashMap<String, Option<String>>>,
     /// TVDB-derived synopsis.
     #[serde(default)]
     overview: Option<String>,
@@ -137,10 +143,10 @@ impl AnizipEpisode {
     fn title(&self, lang: &str) -> Option<String> {
         self.title
             .as_ref()?
-            .get(lang)
-            .map(|s| s.trim())
+            .get(lang)?
+            .clone()
+            .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .map(String::from)
     }
 
     fn rating(&self) -> Option<EpisodeRating> {
@@ -315,6 +321,7 @@ fn merge_anizip_episodes(entry: &mut Value, resp: &AnizipResponse) -> bool {
         .collect();
 
     for (key, az) in &resp.episodes {
+        let Some(az) = az else { continue };
         // Prefer explicit numbering from the payload (TVDB-based), falling
         // back to parsing the anidb-style key ("1", "S1", …).
         let (season, number) = match (az.season_number, az.episode_number) {
@@ -554,7 +561,9 @@ mod tests {
         AnizipEpisode {
             season_number: season,
             episode_number: number,
-            title: en.map(|t| std::collections::HashMap::from([("en".to_string(), t.to_string())])),
+            title: en.map(|t| {
+                std::collections::HashMap::from([("en".to_string(), Some(t.to_string()))])
+            }),
             summary: summary.map(String::from),
             rating: rating.map(String::from),
             ..Default::default()
@@ -596,8 +605,8 @@ mod tests {
         let mut entry = json!({"id": 5, "ids": {"anidb": 23}});
         let resp = AnizipResponse {
             episodes: [
-                ("1".to_string(), az(Some(1), Some(1), Some("Asteroid Blues"), Some("Spike heads to Tijuana"), Some("7.02"))),
-                ("S1".to_string(), az(None, None, Some("Session XX"), None, Some("5.57"))),
+                ("1".to_string(), Some(az(Some(1), Some(1), Some("Asteroid Blues"), Some("Spike heads to Tijuana"), Some("7.02")))),
+                ("S1".to_string(), Some(az(None, None, Some("Session XX"), None, Some("5.57")))),
             ]
             .into_iter()
             .collect(),
@@ -630,7 +639,7 @@ mod tests {
         let resp = AnizipResponse {
             episodes: [(
                 "1".to_string(),
-                az(Some(1), Some(1), Some("ani.zip Title"), Some("ani.zip summary"), Some("8.5")),
+                Some(az(Some(1), Some(1), Some("ani.zip Title"), Some("ani.zip summary"), Some("8.5"))),
             )]
             .into_iter()
             .collect(),
@@ -655,7 +664,7 @@ mod tests {
             ]
         });
         let resp = AnizipResponse {
-            episodes: [("1".to_string(), az(Some(1), Some(1), Some("Ep One"), None, None))]
+            episodes: [("1".to_string(), Some(az(Some(1), Some(1), Some("Ep One"), None, None)))]
                 .into_iter()
                 .collect(),
         };
@@ -672,6 +681,24 @@ mod tests {
         assert!(!merge_anizip_episodes(&mut entry, &resp));
         assert!(entry.get("episodes").is_none());
         assert!(entry.get("sources").is_none());
+    }
+
+    #[test]
+    fn test_null_title_values_and_null_records_are_tolerated() {
+        // Regression: ani.zip emits "en": null inside title maps and whole
+        // null records ("S1": null); strict typing lost 2,744 shows in the
+        // 2026-34-fix1 run.
+        let raw = r#"{"episodes":{
+            "1":{"title":{"en":null,"ja":"ネコ","x-jat":"Neko"},"summary":null,"rating":null},
+            "S1":null}}"#;
+        let resp: AnizipResponse = serde_json::from_str(raw).unwrap();
+        let mut entry = json!({"id": 7, "ids": {"anidb": 1}});
+        assert!(merge_anizip_episodes(&mut entry, &resp));
+        let eps = entry["episodes"].as_array().unwrap();
+        assert_eq!(eps.len(), 1, "null record must be skipped");
+        assert_eq!(eps[0]["titles"]["native"], "ネコ");
+        assert_eq!(eps[0]["titles"]["romaji"], "Neko");
+        assert!(eps[0].get("overview").is_none());
     }
 
     #[test]

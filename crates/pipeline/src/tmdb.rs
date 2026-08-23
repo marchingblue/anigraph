@@ -78,8 +78,11 @@ impl TokenBucket {
 
 // ── TMDB API response types ────────────────────────────────────────────────
 
+/// NOTE: TMDB v3 responses are **snake_case** (`season_number`,
+/// `episode_count`, …).  Do NOT add `rename_all = "camelCase"` here — it
+/// silently deserializes every field to `None` and zero episodes ship
+/// (this exact bug produced the episode-less 2026-34-fix1 release).
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct TmdbTvResponse {
     #[serde(default)]
     images: TmdbImages,
@@ -89,7 +92,6 @@ struct TmdbTvResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct TmdbMovieResponse {
     #[serde(default)]
     images: TmdbImages,
@@ -97,7 +99,6 @@ struct TmdbMovieResponse {
 
 /// Season entry inside the `/tv/{id}` response.
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct TmdbSeasonSummary {
     season_number: Option<i32>,
     #[serde(default)]
@@ -106,7 +107,6 @@ struct TmdbSeasonSummary {
 
 /// Response of `/tv/{id}/season/{n}`.
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct TmdbSeasonResponse {
     #[serde(default)]
     episodes: Vec<TmdbEpisodeDto>,
@@ -114,7 +114,6 @@ struct TmdbSeasonResponse {
 
 /// Episode record inside a season response.
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct TmdbEpisodeDto {
     id: Option<i64>,
     episode_number: Option<i32>,
@@ -938,6 +937,50 @@ mod tests {
     }
 
     // ── Phase identity ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_tmdb_tv_response_parses_snake_case_seasons() {
+        // Regression guard: TMDB v3 payloads are snake_case.  A camelCase
+        // rename silently deserialized every season to None and shipped a
+        // dataset with zero episode metadata (2026-34-fix1).
+        let body: TmdbTvResponse = serde_json::from_str(
+            r#"{"images":{"posters":[]},"seasons":[
+                {"season_number":0,"episode_count":37,"name":"Specials"},
+                {"season_number":1,"episode_count":25,"name":"Season 1"}]}"#,
+        )
+        .unwrap();
+        let seasons: Vec<(i32, i32)> = body
+            .seasons
+            .iter()
+            .filter_map(|s| s.season_number.map(|n| (n, s.episode_count.unwrap_or(0))))
+            .collect();
+        assert_eq!(seasons, vec![(0, 37), (1, 25)]);
+    }
+
+    #[test]
+    fn test_tmdb_episode_dto_parses_snake_case() {
+        let body: TmdbSeasonResponse = serde_json::from_str(
+            r#"{"episodes":[
+                {"id":63066,"episode_number":1,"season_number":1,
+                 "name":"Asteroid Blues","overview":"Spike and Jet…",
+                 "air_date":"1998-04-03","runtime":25,
+                 "vote_average":7.377,"vote_count":57,"still_path":"/a.jpg"},
+                {"id":2,"episode_number":2,"season_number":1,
+                 "name":"Stray Dog Strut","overview":null,"air_date":null}]}"#,
+        )
+        .unwrap();
+        let eps = map_tmdb_episodes(1, &body.episodes);
+        assert_eq!(eps.len(), 2);
+        assert_eq!(eps[0].number, 1);
+        assert_eq!(eps[0].season_number, Some(1));
+        assert_eq!(eps[0].titles.as_ref().unwrap().english.as_deref(), Some("Asteroid Blues"));
+        assert_eq!(eps[0].air_date.as_ref().unwrap().year, 1998);
+        assert_eq!(eps[0].rating.as_ref().unwrap().average, 7.377);
+        assert_eq!(eps[0].rating.as_ref().unwrap().count, Some(57));
+        assert!(eps[0].image.as_deref().unwrap().ends_with("/a.jpg"));
+        assert_eq!(eps[1].overview, None);
+        assert!(eps[1].rating.is_none());
+    }
 
     #[test]
     fn test_tmdb_enrich_phase_id() {
