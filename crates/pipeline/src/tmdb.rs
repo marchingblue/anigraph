@@ -461,6 +461,22 @@ struct CachedShow {
     failure_occurred: bool,
 }
 
+/// Stage a show's episodes into per-season buckets.  Returns the total.
+///
+/// Extracted as a pure helper so the season-staging behavior of the fetch
+/// path is unit-testable (a refactor once discarded `fetch_show_episodes`'s
+/// result, silently shipping zero episodes — this guards against that).
+fn stage_episodes(
+    eps: Vec<Episode>,
+    by_season: &mut std::collections::BTreeMap<i32, Vec<Episode>>,
+) -> usize {
+    for ep in eps {
+        let sn = ep.season_number.unwrap_or(1);
+        by_season.entry(sn).or_default().push(ep);
+    }
+    by_season.values().map(Vec::len).sum()
+}
+
 /// Fetch a show's artwork and its complete multi-season episode list once.
 async fn fetch_full_show(
     http: &reqwest::Client,
@@ -471,11 +487,14 @@ async fn fetch_full_show(
     let mut show = CachedShow::default();
     if let Some(resp) = fetch_tv(http, api_key, bucket, tv_id).await? {
         show.images = resp.images;
-        if let Err(e) = fetch_show_episodes(http, api_key, bucket, tv_id, &resp.seasons).await {
-            tracing::warn!("TMDB TV {tv_id}: episode fetch failed: {e:#}");
-            show.failure_occurred = true;
-        } else {
-            show.episode_total = show.episodes_by_season.values().map(Vec::len).sum();
+        match fetch_show_episodes(http, api_key, bucket, tv_id, &resp.seasons).await {
+            Ok(eps) => {
+                show.episode_total = stage_episodes(eps, &mut show.episodes_by_season);
+            }
+            Err(e) => {
+                tracing::warn!("TMDB TV {tv_id}: episode fetch failed: {e:#}");
+                show.failure_occurred = true;
+            }
         }
     } // else: 404 — stale cross-reference
     Ok(show)
@@ -1053,6 +1072,30 @@ mod tests {
     }
 
     // ── Phase identity ─────────────────────────────────────────────────
+
+    // ── Episode staging ──────────────────────────────────────────────
+
+    #[test]
+    fn test_stage_episodes_buckets_by_season() {
+        // Regression: fetch_full_show once discarded fetch_show_episodes's
+        // result, leaving episodes_by_season empty and shipping zero episodes.
+        let eps = vec![dep(1, 1, 2020, 1, 1), dep(1, 2, 2020, 1, 8), dep(2, 1, 2021, 1, 1)];
+        let mut by_season = std::collections::BTreeMap::new();
+        let total = stage_episodes(eps, &mut by_season);
+        assert_eq!(total, 3);
+        assert_eq!(by_season[&1].len(), 2);
+        assert_eq!(by_season[&2].len(), 1);
+        assert_eq!(by_season[&1][0].number, 1);
+        assert_eq!(by_season[&1][1].number, 2);
+    }
+
+    #[test]
+    fn test_stage_episodes_defaults_undated_to_season_1() {
+        let eps = vec![Episode { number: 9, season_number: None, ..Default::default() }];
+        let mut by_season = std::collections::BTreeMap::new();
+        assert_eq!(stage_episodes(eps, &mut by_season), 1);
+        assert_eq!(by_season[&1][0].number, 9);
+    }
 
     // ── Season attribution ────────────────────────────────────────────
 
