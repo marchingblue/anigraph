@@ -77,8 +77,7 @@ struct TvdbLoginResponse {
 // NOTE: TVDB v4's episode-list endpoints stopped returning `name`/`overview`
 // (they now come back null; titles moved to per-episode translation
 // endpoints), so anigraph no longer sources episodes from TVDB.  Episodes
-// come from the TMDB phase, filled in by the ani.zip phase.  TVDB remains
-// for artwork only.
+// come from the TMDB phase.  TVDB remains for artwork only.
 
 /// TVDB v4 extended series response — includes artworks, episodes, etc.
 /// We only deserialize the `artworks` field; the rest is ignored via

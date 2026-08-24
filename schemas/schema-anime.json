@@ -390,7 +390,7 @@
           },
           "titles": {
             "type": "object",
-            "description": "Episode titles (english/native/romaji), populated from TMDB and ani.zip.",
+            "description": "Episode titles (english/native/romaji), sourced from TMDB.",
             "properties": {
               "english": {
                 "type": "string"

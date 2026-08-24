@@ -78,10 +78,9 @@ pub struct AnimeEntry {
 
 /// Per-episode metadata.
 ///
-/// Primary source is TMDB (`/tv/{id}/season/{n}`); ani.zip (AniDB-derived)
-/// fills multilanguage titles, AniDB summaries/ratings, and covers series
-/// that TMDB doesn't know.  All fields except `number` are optional and
-/// omitted when absent — never serialized as empty strings or nulls.
+/// Source is TMDB (`/tv/{id}/season/{n}`).  All fields except `number` are
+/// optional and omitted when absent — never serialized as empty strings or
+/// nulls.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Episode {
